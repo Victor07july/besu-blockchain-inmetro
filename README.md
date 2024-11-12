@@ -10,6 +10,8 @@ The following env files needs to be renamed:
 - `quorum-explorer/env.example` 
 - `config/besu/.env.example`
 
+To run this project in production, other files need to be removed from git, like Besu members keys.
+
 ## Table of Contents
 
 - [Besu Dev Quickstart](#besu-dev-quickstart)
