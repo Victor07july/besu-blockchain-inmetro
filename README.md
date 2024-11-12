@@ -6,9 +6,9 @@ For security reasons, the original env files were not versioned.
 
 The following env files needs to be renamed:
 
-`.env.example` (in the project's base path)
-`quorum-explorer/env.example`
-`config/besu/.env.example`
+- `.env.example` (in the project's base path)
+- `quorum-explorer/env.example` 
+- `config/besu/.env.example`
 
 ## Table of Contents
 
