@@ -12,6 +12,7 @@ async function getAcess() {
     http.get(options, function (res) {
       let data = '';
 
+
       res.on('data', function (chunk) {
         data += chunk;
       });
