@@ -15,7 +15,7 @@ module.exports = {
   besu: {
     rpcnode: {
       name: "rpcnode",
-      url: "http://127.0.0.1:8545",
+      url: "http://172.16.239.71/testeu/",
       wsUrl: "ws://127.0.0.1:8546",
       nodekey:
         "0e93a540518eeb673d94fb496b746008ab56605463cb9212493997f5755124d1",

@@ -92,7 +92,8 @@ function App() {
       acc: accounts[0],
 
     }
-    fetch('http://localhost:3050/receive', {
+    console.log(accounts);
+    fetch('http://localhost/jwtserver/receive', {
       method: "post",
       headers: {
         "Content-Type": "application/json ; charset=UTF-8"
@@ -157,7 +158,7 @@ function App() {
         const from = accounts[0];
 
         // Convert ETH amount to wei (hex)
-       // const value = `0x${(amount * 1e18).toString(16)}`;
+        // const value = `0x${(amount * 1e18).toString(16)}`;
 
         // Prepare transaction
         const transaction = {
@@ -248,6 +249,8 @@ function App() {
         <br />
 
       </div>
+
+    
     </>
   )
 }

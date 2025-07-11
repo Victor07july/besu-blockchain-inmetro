@@ -12,14 +12,12 @@ x-besu-def:
     - |
 
       cp "/config/${BESU_CONS_ALGO:-QBFT}genesis.json" /config/genesis.json
+      cp "/tls/publicRSAKey.pem" /config/publicRSAKey.pem
 
       /opt/besu/bin/besu \
-      --config-file=/config/config.toml \
+      --config-file=/config/configu.toml \
       --p2p-host=$$(hostname -i) \
-#      cp "/TLS/publicRSAKey.pem" /config/publicRSAKey.pem
-#      --rpc-http-api=EEA,WEB3,ETH,NET,TRACE,DEBUG,ADMIN,TXPOOL,PERM,${BESU_CONS_ALGO:-QBFT} \
-#      --rpc-http-authentication-jwt-public-key-file=/config/publicRSAKey.pem \
-#      --rpc-ws-api=EEA,WEB3,ETH,NET,TRACE,DEBUG,ADMIN,TXPOOL,PERM,${BESU_CONS_ALGO:-QBFT} ;
+      --rpc-http-api=EEA,WEB3,ETH,NET,TRACE,DEBUG,ADMIN,TXPOOL,PERM,${BESU_CONS_ALGO:-QBFT} \
 
 x-ethsignerProxy-def:
   &ethsignerProxy-def
@@ -29,7 +27,7 @@ x-ethsignerProxy-def:
     "--chain-id=1337",
     "--http-listen-host=0.0.0.0",
     "--downstream-http-port=8545",
-    "--downstream-http-host=rpcnode-user",
+    "--downstream-http-host=rpcnode-admin",
     "file-based-signer",
     "-k",
     "/opt/ethsigner/keyfile",
@@ -39,22 +37,23 @@ x-ethsignerProxy-def:
   ports:
     - 8545
 
+ 
+
 services:
 
   nodetls:
     restart: "on-failure"
     build: 
-     context: ./config/JWT  
+     context: ./config/jwt  
      dockerfile: ./Dockerfile
     container_name: node 
     image: nodetls
     networks:
       quorum-dev-quickstart:
-        ipv4_address: 172.16.239.72
+         ipv4_address: 172.16.239.72
     ports: 
-      - 3000:3000
-           
-       
+         - 3000:3000
+              
   caddy:
     image: caddy:latest
     restart: "on-failure"
@@ -75,14 +74,13 @@ services:
       - 21001:8545/tcp
       - 30303
       - 9545
-      - 8545
     environment:
       - OTEL_RESOURCE_ATTRIBUTES=service.name=validator1,service.version=${BESU_VERSION:-latest}
     labels:
       - "consensus=besu"
     volumes:
       - ./config/besu/:/config
-      - ./config/TLS/:/TLS
+      - ./config/tls/:/tls
       - ./config/nodes/validator1:/opt/besu/keys
       - ./logs/besu:/tmp/besu
     networks:
@@ -95,7 +93,6 @@ services:
       - 21002:8545/tcp
       - 30303
       - 9545
-      - 8545
     environment:
       - OTEL_RESOURCE_ATTRIBUTES=service.name=validator2,service.version=${BESU_VERSION:-latest}
     labels:
@@ -116,7 +113,6 @@ services:
       - 21003:8545/tcp
       - 30303
       - 9545
-      - 8545
     environment:
       - OTEL_RESOURCE_ATTRIBUTES=service.name=validator3,service.version=${BESU_VERSION:-latest}
     labels:
@@ -137,7 +133,6 @@ services:
       - 21004:8545/tcp
       - 30303
       - 9545
-      - 8545
     environment:
       - OTEL_RESOURCE_ATTRIBUTES=service.name=validator4,service.version=${BESU_VERSION:-latest}
     labels:
@@ -162,19 +157,18 @@ services:
       - /bin/bash
       - -c
       - |
-
-        cp "/config/${BESU_CONS_ALGO:-QBFT}genesis.json" /config/genesis.json
-        cp "/TLS/publicRSAKey.pem" /config/besu/publicRSAKey.pem
-
+        cp "/config/${BESU_CONS_ALGO:-QBFT}genesis.json" /config/genesis.json  
         /opt/besu/bin/besu \
         --config-file=/config/config.toml \
         --p2p-host=$$(hostname -i) \
-        --rpc-http-api=EEA,WEB3,ETH,NET,TRACE,DEBUG,ADMIN,TXPOOL,PERM,${BESU_CONS_ALGO:-QBFT} \
+        --rpc-http-api=WEB3,ETH,NET,TRACE,DEBUG,ADMIN,TXPOOL,PERM,${BESU_CONS_ALGO:-QBFT} \
         --rpc-http-authentication-jwt-public-key-file=/config/publicRSAKey.pem \
+     
     environment:
       - OTEL_RESOURCE_ATTRIBUTES=service.name=rpcnode,service.version=${BESU_VERSION:-latest}
     volumes:
       - ./config/besu/:/config
+      - ./config/tls/:/tls
       - ./config/nodes/rpcnode-admin:/opt/besu/keys
       - ./logs/besu:/tmp/besu
     depends_on:
@@ -183,7 +177,7 @@ services:
       - 8545:8545/tcp
       - 8546:8546/tcp
       - 30303
-      - 8545
+      - 9545
     networks:
       quorum-dev-quickstart:
         ipv4_address: 172.16.239.15
@@ -199,14 +193,11 @@ services:
       - /bin/bash
       - -c
       - |
-
         cp "/config/${BESU_CONS_ALGO:-QBFT}genesis.json" /config/genesis.json
-        cp "/TLS/publicRSAKey.pem" /config/publicRSAKey.pem
-
         /opt/besu/bin/besu \
-        --config-file=/config/config.toml \
+        --config-file=/config/configu.toml \
         --p2p-host=$$(hostname -i) \
-        --rpc-http-api=EEA,WEB3,ETH,TXPOOL,${BESU_CONS_ALGO:-QBFT} \
+        --rpc-http-api=EEA,WEB3,ETH,NET,TRACE,DEBUG,ADMIN,TXPOOL,PERM,${BESU_CONS_ALGO:-QBFT} \
     environment:
       - OTEL_RESOURCE_ATTRIBUTES=service.name=rpcnode,service.version=${BESU_VERSION:-latest}
     volumes:
@@ -217,27 +208,13 @@ services:
       - validator1
     ports:
       - 8547:8545/tcp
-      - 8548:8546/tcp
+      - 8548:8548/tcp
       - 30303
-      - 8545
+      - 9545
     networks:
       quorum-dev-quickstart:
         ipv4_address: 172.16.239.19
 
-  ethsignerProxy:
-    << : *ethsignerProxy-def
-    volumes:
-      - ./config/ethsigner/password:/opt/ethsigner/passwordfile
-      - ./config/ethsigner/key:/opt/ethsigner/keyfile
-    depends_on:
-      - validator1
-      - rpcnode-user
-    ports:
-      - 18545:8545/tcp
-    networks:
-      quorum-dev-quickstart:
-        ipv4_address: 172.16.239.40
-  
   explorer:
     image: consensys/quorum-explorer:${QUORUM_EXPLORER_VERSION:-latest}
     volumes:
@@ -249,7 +226,26 @@ services:
       - 25000:25000/tcp
     networks:
       quorum-dev-quickstart:
-        ipv4_address: 172.16.239.31
+       ipv4_address: 172.16.239.31
+
+
+  
+  ethsignerProxy:
+    << : *ethsignerProxy-def
+    volumes:
+      - ./config/ethsigner/password:/opt/ethsigner/passwordfile
+      - ./config/ethsigner/key:/opt/ethsigner/keyfile
+    depends_on:
+      - validator1
+      - rpcnode-admin
+    ports:
+      - 18545:8545/tcp
+    networks:
+      quorum-dev-quickstart:
+        ipv4_address: 172.16.239.40
+
+    
+  
 
 volumes:
   public-keys:
