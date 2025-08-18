@@ -12,8 +12,8 @@ class UserSQLAlchemyRepository(UserBaseRepository):
         self.db_session = db_session
 
     async def get_users(self) -> list[User]:
-        result = await self.db_session.exec(select(User))
-        user: list[User] = result.all()
+        result = await self.db_session.execute(select(User))
+        user: list[User] = result.scalars().all()
         return user
 
     async def get_user_by_email(self, email: str) -> User | None:

@@ -28,7 +28,7 @@ class TestCreateUser:
         assert response.status_code == HTTPStatus.BAD_REQUEST
 
     @pytest.mark.asyncio
-    async def test_create_user_with_invalid_email(self, client, user, token):
+    async def test_create_user_with_invalid_email(self, client, token):
         test_token = await token()
         invalid_payload = {"username": "john.doe@email", "password": "Test@123"}
         header = {"Authorization": f"Bearer {test_token}"}
@@ -41,7 +41,7 @@ class TestCreateUser:
         assert data["detail"] == "Invalid email format"
 
     @pytest.mark.asyncio
-    async def test_create_user_with_invalid_password(self, client, user, token):
+    async def test_create_user_with_invalid_password(self, client, token):
         test_token = await token()
         invalid_payload = {"username": "john.doe@email.com", "password": "Test123"}
         header = {"Authorization": f"Bearer {test_token}"}
