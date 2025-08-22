@@ -100,6 +100,8 @@ async def admin(db_session, admin_payload):
     fake_admin = User(
         email=admin_payload["username"],
         hashed_password=hashed_password,
+        is_active=True,
+        is_admin=True,
     )
     db_session.add(fake_admin)
     await db_session.commit()
@@ -119,3 +121,16 @@ def token(db_session, admin, admin_payload):
         return auth_user.token
 
     return _token
+
+@pytest.fixture
+def user_token(db_session, user, user_payload):
+    async def _user_token():
+        user_repo = UserSQLAlchemyRepository(db_session)
+        auth_user = await signin_user(
+            email=user_payload["username"],
+            password=user_payload["password"],
+            user_repo=user_repo,
+        )
+        return auth_user.token
+
+    return _user_token

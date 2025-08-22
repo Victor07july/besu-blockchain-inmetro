@@ -9,16 +9,6 @@ from passlib.hash import pbkdf2_sha512
 from src.core.repositories.users.user_base_repository import UserBaseRepository
 
 
-async def check_authorization(authorization: str) -> bool:
-    if authorization is None:
-        raise Unauthorized()
-
-    token = authorization.split()[1]
-    await validate_token(token)
-
-    return True
-
-
 async def get_users(user_repo: UserBaseRepository) -> list[User]:
     users: list[User] = await user_repo.get_users()
     result: list[ListUser] = []

@@ -2,7 +2,7 @@ from http import HTTPStatus
 from typing import Annotated
 
 from fastapi import APIRouter, Header
-from src.users.service import check_authorization
+from src.core.middlewares.authentication_middleware import check_authorization
 from src.besu.services import is_besu_connected
 from src.besu.schemas import BesuStatus
 

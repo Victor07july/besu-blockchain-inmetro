@@ -55,6 +55,20 @@ class TestUpdateUser:
         )
         assert response.status_code == HTTPStatus.UNAUTHORIZED
         assert response.json() == {'detail': 'Invalid token'}
+
+    @pytest.mark.asyncio
+    async def test_update_user_forbidden(self, client, user, user_token):
+        user = await user()
+        token = await user_token()
+        response = await client.put(
+            url="/api/v1/users/",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "email": user.email,
+            }
+        )
+        assert response.status_code == HTTPStatus.FORBIDDEN
+        assert response.json() == {'detail': 'Token bearer cannot execute the required operation'}
     
     @pytest.mark.asyncio
     async def test_update_user_not_found(self, client, token):

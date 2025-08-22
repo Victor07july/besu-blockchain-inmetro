@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 
-from src.core.exceptions import Unauthorized, UnauthorizedByExpiredSignature
+from src.core.repositories.users.user_base_repository import UserBaseRepository
+from src.core.exceptions import Forbidden, Unauthorized, UnauthorizedByExpiredSignature
 from dotenv import load_dotenv
 from jose import JWTError, jwt, ExpiredSignatureError
 from os import getenv
@@ -23,6 +24,7 @@ context = CryptContext(
 )
 
 
+
 async def validate_token(access_token: str = Depends(oauth2_scheme)) -> User:
     try:
         payload = jwt.decode(access_token, key=JWT_SECRET, algorithms=[JWT_ALGORITHM])
@@ -35,7 +37,7 @@ async def validate_token(access_token: str = Depends(oauth2_scheme)) -> User:
         raise UnauthorizedByExpiredSignature()
     except JWTError:
         raise Unauthorized()
-
+    
 
 async def create_token(user_id: int, username: str):
     expire = datetime.utcnow() + timedelta(days=int(JWT_EXPIRATION_DAYS))
@@ -49,3 +51,27 @@ async def create_token(user_id: int, username: str):
         algorithm=JWT_ALGORITHM,
     )
     return access_token
+
+
+async def check_authorization(authorization: str) -> bool:
+    if authorization is None:
+        raise Unauthorized()
+
+    token = authorization.split()[1]
+    await validate_token(token)
+
+    return True
+
+
+async def check_is_admin(authorization: str, user_repo: UserBaseRepository) -> bool:
+    if authorization is None:
+        raise Unauthorized()
+
+    token = authorization.split()[1]
+    token_user = await validate_token(token)
+    user = await user_repo.get_user_by_email(token_user.email)
+    print("USUARIO DE TESTE: ", user)
+    if user.is_admin is False or user.is_active is False:
+        raise Forbidden()
+
+    return user.is_admin
