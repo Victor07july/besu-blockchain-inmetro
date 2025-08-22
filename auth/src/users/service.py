@@ -3,7 +3,7 @@ from src.core.middlewares.authentication_middleware import validate_token
 from src.core.middlewares.email_validator import validate_email
 from src.core.middlewares.password_validator import validate_password
 from src.core.models import User
-from src.users.schemas import ListUser
+from src.users.schemas import ListUser, PutUserRequest
 from passlib.hash import pbkdf2_sha512
 
 from src.core.repositories.users.user_base_repository import UserBaseRepository
@@ -54,3 +54,12 @@ async def create_user(
 
     hashed_password = pbkdf2_sha512.hash(password)
     return await user_repo.add_user(email=email, hashed_password=hashed_password)
+
+
+async def update_user(
+    new_user_data: PutUserRequest,
+    user_repo: UserBaseRepository,
+) -> User | None:
+    validate_email(new_user_data.email)
+    user = await user_repo.update_user(new_user_data.email, new_user_data.first_name, new_user_data.last_name, new_user_data.is_active, new_user_data.is_admin)
+    return user

@@ -1,10 +1,10 @@
 from datetime import datetime, timedelta
-from http.client import UNAUTHORIZED
 
+from src.core.exceptions import Unauthorized, UnauthorizedByExpiredSignature
 from dotenv import load_dotenv
 from jose import JWTError, jwt, ExpiredSignatureError
 from os import getenv
-from fastapi import Depends, HTTPException
+from fastapi import Depends
 from fastapi.security import OAuth2PasswordBearer
 from passlib.context import CryptContext
 
@@ -32,17 +32,9 @@ async def validate_token(access_token: str = Depends(oauth2_scheme)) -> User:
             email=payload["email"],
         )
     except ExpiredSignatureError:
-        raise HTTPException(
-            status_code=UNAUTHORIZED,
-            detail="Credential expired",
-            headers={"Authorization": "Bearer"},
-        )
+        raise UnauthorizedByExpiredSignature()
     except JWTError:
-        raise HTTPException(
-            status_code=UNAUTHORIZED,
-            detail="Could not validate credentials",
-            headers={"Authorization": "Bearer"},
-        )
+        raise Unauthorized()
 
 
 async def create_token(user_id: int, username: str):

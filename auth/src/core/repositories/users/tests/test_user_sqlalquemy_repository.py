@@ -1,3 +1,4 @@
+from src.core.exceptions import UserNotFoundException
 import pytest
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -73,8 +74,8 @@ class TestUserSQLAlchemyRepository:
         created_user = await repository.add_user(email, hashed_password)
 
         # Verify directly from database to ensure it was saved
-        result = await db_session.execute(select(User).where(User.email == email))
-        db_user = result.scalar_one_or_none()
+        result = await db_session.exec(select(User).where(User.email == email))
+        db_user = result.one_or_none()
 
         # Assert
         assert created_user is not None
@@ -100,3 +101,75 @@ class TestUserSQLAlchemyRepository:
         # Act & Assert
         with pytest.raises(Exception):
             await repository.add_user(email, "new_hash")
+
+    @pytest.mark.asyncio
+    async def test_update_user_success(self, db_session: AsyncSession):
+        # Arrange
+        email = "update@email.com"
+        user = User(email=email, hashed_password="hashedpass")
+        db_session.add(user)
+        await db_session.commit()
+
+        repository = UserSQLAlchemyRepository(db_session)
+
+        # Act
+        updated_user = await repository.update_user(
+            email=email,
+            first_name="UpdatedFirstName",
+            last_name="UpdatedLastName",
+            is_active=True,
+            is_admin=True
+        )
+
+        # Assert
+        assert updated_user is not None
+        assert updated_user.first_name == "UpdatedFirstName"
+        assert updated_user.last_name == "UpdatedLastName"
+        assert updated_user.is_active is True
+        assert updated_user.is_admin is True
+
+    @pytest.mark.asyncio
+    async def test_update_user_with_missing_fields(self, db_session: AsyncSession):
+        # Arrange
+        email = "update@email.com"
+        user = User(email=email, hashed_password="hashedpass")
+        db_session.add(user)
+        await db_session.commit()
+
+        repository = UserSQLAlchemyRepository(db_session)
+
+        # Act
+        updated_user = await repository.update_user(
+            email=email,
+            first_name="UpdatedFirstName",
+            last_name="UpdatedLastName",
+            is_active=None,
+            is_admin=None
+        )
+
+        # Assert
+        assert updated_user is not None
+        assert updated_user.first_name == "UpdatedFirstName"
+        assert updated_user.last_name == "UpdatedLastName"
+        assert updated_user.is_active == user.is_active
+        assert updated_user.is_admin == user.is_admin
+
+    @pytest.mark.asyncio
+    async def test_update_user_nonexistent(self, db_session: AsyncSession):
+        # Arrange
+        repository = UserSQLAlchemyRepository(db_session)
+
+        # Act
+        try:
+            updated_user = await repository.update_user(
+                email="nonexistent@email.com",
+                first_name="UpdatedFirstName",
+                last_name="UpdatedLastName",
+                is_active=True,
+                is_admin=True
+            )
+        except Exception as e:
+             # Assert
+            assert isinstance(e, UserNotFoundException)
+
+       

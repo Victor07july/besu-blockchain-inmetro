@@ -15,3 +15,7 @@ class UserBaseRepository(ABC):
     @abstractmethod
     async def add_user(self, email: str, hashed_password: str) -> User:
         pass
+
+    @abstractmethod
+    async def update_user(self, email: str, first_name: str, last_name: str, is_active: bool, is_admin) -> User:
+        pass

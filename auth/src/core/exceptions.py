@@ -18,10 +18,22 @@ class Unauthorized(HTTPException):
             detail="Invalid token",
         )
 
+class UnauthorizedByExpiredSignature(HTTPException):
+    def __init__(self):
+        super().__init__(
+            status_code=HTTPStatus.UNAUTHORIZED,
+            detail="Credential expired",
+        )
 
 class Forbidden(HTTPException):
     def __init__(self):
         super().__init__(
             status_code=HTTPStatus.FORBIDDEN,
             detail="Token bearer cannot execute the required operation",
+        )
+
+class UserNotFoundException(HTTPException):
+    def __init__(self):
+        super().__init__(
+            status_code=HTTPStatus.NOT_FOUND, detail="User not found for given email."
         )

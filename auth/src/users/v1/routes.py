@@ -6,11 +6,12 @@ from fastapi.security import OAuth2PasswordRequestForm
 from passlib.context import CryptContext
 
 from src.core.repositories.users import UserBaseRepository, get_user_repository
-from src.users.schemas import PostUser, ListUser
+from src.users.schemas import PostUser, ListUser, PutUserRequest
 from src.users.service import (
     get_users,
     check_authorization,
     create_user,
+    update_user,
 )
 
 users_v1_router = APIRouter(prefix="/v1/users")
@@ -49,3 +50,22 @@ async def post_user(
         )
         return user
     return None
+
+
+@users_v1_router.put(
+    "/",
+    status_code=HTTPStatus.OK,
+)
+async def put_user(
+    user: PutUserRequest,
+    authorization: Annotated[str | None, Header()] = None,
+    user_repo: UserBaseRepository = Depends(get_user_repository),
+):
+    is_authorized = await check_authorization(authorization)
+    if is_authorized:
+        await update_user(
+            new_user_data=user,
+            user_repo=user_repo,
+        )
+    return {"details": "User updated successfully"}
+    
