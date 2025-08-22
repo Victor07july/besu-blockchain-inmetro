@@ -13,15 +13,15 @@ class UserSQLAlchemyRepository(UserBaseRepository):
         self.db_session = db_session
 
     async def get_users(self) -> list[User]:
-        result = await self.db_session.exec(select(User))
-        users: list[User] = result.all()
+        result = await self.db_session.execute(select(User))
+        users: list[User] = result.scalars().all()
         return users
 
     async def get_user_by_email(self, email: str) -> User | None:
-        result = await self.db_session.exec(
+        result = await self.db_session.execute(
             select(User).where(User.email == email)
         )
-        user: User = result.one_or_none()
+        user: User = result.scalars().one_or_none()
         return user
 
     async def add_user(self, email: str, hashed_password: str):

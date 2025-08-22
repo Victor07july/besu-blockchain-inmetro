@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.core.api import api_router
 from src.core.middlewares.exceptions_handler import error_handler_middleware
 from src.config.database.setup import get_db_session
+from src.config.web3.setup import get_web3_client
 
 app = FastAPI()
 
@@ -30,5 +31,6 @@ app.include_router(
     api_router,
     dependencies=[
         Depends(get_db_session),
+        Depends(get_web3_client)
     ],
 )
