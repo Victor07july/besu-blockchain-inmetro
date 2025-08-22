@@ -18,7 +18,6 @@ x-besu-def:
       --p2p-host=$$(hostname -i) \
       --rpc-http-api=WEB3,ETH,NET,TRACE,DEBUG,ADMIN,TXPOOL,PERM,${BESU_CONS_ALGO:-QBFT} \
 
-    # cp "/tls/publicRSAKey.pem" /config/publicRSAKey.pem
 
 x-ethsignerProxy-def:
   &ethsignerProxy-def
@@ -50,7 +49,7 @@ services:
       - 80:80
       - 443:443
     networks:
-      quorum-dev-quickstart:
+      besu-network:
         ipv4_address: 172.16.239.20
     depends_on:
       auth-service:
@@ -61,7 +60,7 @@ services:
       file: ./auth/docker-compose.yml
       service: auth-db
     networks:
-      quorum-dev-quickstart:
+      besu-network:
         ipv4_address: 172.16.239.21
 
   auth-service:
@@ -69,7 +68,7 @@ services:
       file: ./auth/docker-compose.yml
       service: auth-service
     networks:
-      quorum-dev-quickstart:
+      besu-network:
         ipv4_address: 172.16.239.22
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/healthcheck/"]
@@ -84,33 +83,7 @@ services:
       file: ./auth/docker-compose.yml
       service: auth-service-init
     networks:
-      - quorum-dev-quickstart
-
-  # nodetls:
-  #   restart: "on-failure"
-  #   build: 
-  #    context: ./config/jwt  
-  #    dockerfile: ./Dockerfile
-  #   container_name: node
-  #   image: nodetls
-  #   networks:
-  #     quorum-dev-quickstart:
-  #        ipv4_address: 172.16.239.72
-  #   ports: 
-  #        - 3000:3000
-              
-  # caddy:
-  #   image: caddy:latest
-  #   restart: "on-failure"
-  #   container_name: caddy
-  #   ports:
-  #     - 80:80
-  #     - 441:441
-  #   volumes:
-  #     - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile
-  #   networks:
-  #     quorum-dev-quickstart:
-  #       ipv4_address: 172.16.239.71
+      - besu-network
 
 
   validator1:
@@ -129,7 +102,7 @@ services:
       - ./config/nodes/validator1:/opt/besu/keys
       - ./logs/besu:/tmp/besu
     networks:
-      quorum-dev-quickstart:
+      besu-network:
         ipv4_address: 172.16.239.11
 
   validator2:
@@ -149,7 +122,7 @@ services:
     depends_on:
       - validator1
     networks:
-      quorum-dev-quickstart:
+      besu-network:
         ipv4_address: 172.16.239.12
 
   validator3:
@@ -169,7 +142,7 @@ services:
     depends_on:
       - validator1
     networks:
-      quorum-dev-quickstart:
+      besu-network:
         ipv4_address: 172.16.239.13
 
   validator4:
@@ -189,7 +162,7 @@ services:
     depends_on:
       - validator1
     networks:
-      quorum-dev-quickstart:
+      besu-network:
         ipv4_address: 172.16.239.14
   
   member1besu:
@@ -216,7 +189,7 @@ services:
       - 20000:8545/tcp
       - 20001:8546/tcp
     networks:
-      quorum-dev-quickstart:
+      besu-network:
         ipv4_address: 172.16.239.16
 
   rpcnode-admin:
@@ -231,7 +204,7 @@ services:
       - |
         cp "/config/${BESU_CONS_ALGO:-QBFT}genesis.json" /config/genesis.json  
         /opt/besu/bin/besu \
-        --config-file=/config/config.toml \
+        --config-file=/config/rpcnode-admin-config.toml \
         --p2p-host=$$(hostname -i) \
         --rpc-http-api=WEB3,ETH,NET,TRACE,DEBUG,ADMIN,TXPOOL,PERM,${BESU_CONS_ALGO:-QBFT} \
         --rpc-http-authentication-jwt-public-key-file=/config/publicRSAKey.pem \
@@ -251,7 +224,7 @@ services:
       - 30303
       - 9545
     networks:
-      quorum-dev-quickstart:
+      besu-network:
         ipv4_address: 172.16.239.15
 
 
@@ -267,7 +240,7 @@ services:
       - |
         cp "/config/${BESU_CONS_ALGO:-QBFT}genesis.json" /config/genesis.json
         /opt/besu/bin/besu \
-        --config-file=/config/configu.toml \
+        --config-file=/config/rpcnode-user-config.toml \
         --p2p-host=$$(hostname -i) \
         --rpc-http-api=WEB3,ETH,NET,${BESU_CONS_ALGO:-QBFT} \
     environment:
@@ -284,7 +257,7 @@ services:
       - 30303
       - 9545
     networks:
-      quorum-dev-quickstart:
+      besu-network:
         ipv4_address: 172.16.239.19
 
   chain-explorer:
@@ -297,7 +270,7 @@ services:
     ports:
       - 25000:25000/tcp
     networks:
-      quorum-dev-quickstart:
+      besu-network:
        ipv4_address: 172.16.239.31
 
   
@@ -312,7 +285,7 @@ services:
   #   ports:
   #     - 18545:8545/tcp
   #   networks:
-  #     quorum-dev-quickstart:
+  #     besu-network:
   #       ipv4_address: 172.16.239.40
 
 
@@ -320,8 +293,8 @@ volumes:
   public-keys:
 
 networks:
-  quorum-dev-quickstart:
-    name: quorum-dev-quickstart
+  besu-network:
+    name: besu-network
     driver: bridge
     ipam:
       config:

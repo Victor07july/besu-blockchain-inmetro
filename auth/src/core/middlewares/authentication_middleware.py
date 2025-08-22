@@ -40,12 +40,13 @@ async def validate_token(access_token: str = Depends(oauth2_scheme)) -> User:
     
 
 async def create_token(user_id: int, username: str):
-    expire = datetime.utcnow() + timedelta(days=int(JWT_EXPIRATION_DAYS))
+    expire = datetime.now(datetime.timezone.utc) + timedelta(days=int(JWT_EXPIRATION_DAYS))
     access_token = jwt.encode(
         {
             "user_id": user_id,
             "email": username,
             "exp": expire,
+            "iat": datetime.now(datetime.timezone.utc).timestamp(),
         },
         JWT_SECRET,
         algorithm=JWT_ALGORITHM,
