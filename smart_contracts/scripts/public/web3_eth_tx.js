@@ -1,16 +1,35 @@
 const path = require('path');
 const fs = require('fs-extra');
 const Web3 = require('web3');
+const http = require('http');
+var token = require('./token');
 
 // member1 details
-const { tessera, besu, accounts } = require("../keys.js");
+const { besu, accounts } = require("../keys.js");
 const host = besu.rpcnode.url;
 
-async function main(){
-  const web3 = new Web3(host);
+
+
+async function main(acc) {
+
+
+  const accessToken = await token.getAcess();
+
+
+  const provider = new Web3.providers.HttpProvider(host, {
+    headers: [
+      {
+        name: 'Authorization',
+        value: `Bearer ${accessToken}`
+      }
+    ]
+  });
+
+  const web3 = new Web3(provider);
+
   //pre seeded account - test account only
-  
-  const privateKeyA = accounts.a.privateKey; 
+
+  const privateKeyA = accounts.a.privateKey;
   const accountA = web3.eth.accounts.privateKeyToAccount(privateKeyA);
   var accountABalance = web3.utils.fromWei(await web3.eth.getBalance(accountA.address));
   console.log("Account A has balance of: " + accountABalance);
@@ -24,7 +43,7 @@ async function main(){
   const txn = {
     nonce: web3.utils.numberToHex(await web3.eth.getTransactionCount(accountA.address)),
     from: accountA.address,
-    to: accountB.address, 
+    to: accountB.address,
     value: "0x100",  //amount of eth to transfer
     gasPrice: "0x0", //ETH per unit of gas
     gasLimit: "0x24A22" //max number of gas units the tx is allowed to use
