@@ -36,8 +36,26 @@ async def compile_solidity_contract(contract_file: UploadFile) -> ContractCompil
         if pragma_match:
             solc_version = pragma_match.group(1)
         else:
-            # Versão padrão se não encontrar pragma
-            solc_version = "0.8.10"
+            # Tentar detectar apenas major.minor
+            pragma_match = re.search(r'pragma\s+solidity\s+[\^~]?([0-9]+\.[0-9]+)', source_code)
+            if pragma_match:
+                version_parts = pragma_match.group(1)
+                # Para versões antigas como ^0.4.8, usar a última versão da série
+                if version_parts.startswith('0.4'):
+                    solc_version = "0.4.26"  # Última versão 0.4.x
+                elif version_parts.startswith('0.5'):
+                    solc_version = "0.5.17"  # Última versão 0.5.x
+                elif version_parts.startswith('0.6'):
+                    solc_version = "0.6.12"  # Última versão 0.6.x
+                elif version_parts.startswith('0.7'):
+                    solc_version = "0.7.6"   # Última versão 0.7.x
+                elif version_parts.startswith('0.8'):
+                    solc_version = "0.8.19"  # Versão estável 0.8.x
+                else:
+                    solc_version = "0.8.19"  # Versão padrão
+            else:
+                # Versão padrão se não encontrar pragma
+                solc_version = "0.8.19"
         
         # Instalar e configurar versão do solc se necessário
         try:
@@ -46,8 +64,8 @@ async def compile_solidity_contract(contract_file: UploadFile) -> ContractCompil
         except Exception as version_error:
             # Se falhar, tentar com versão padrão
             try:
-                install_solc("0.8.10")
-                set_solc_version("0.8.10")
+                install_solc("0.8.19")
+                set_solc_version("0.8.19")
             except Exception as fallback_error:
                 return ContractCompilationResponse(
                     success=False,
