@@ -51,10 +51,6 @@ type StatusRecompensa struct {
 	Valor    uint64 `json:"valor"` // Valor da recompensa em wei
 }
 
-type Carteira struct {
-	Condutor string `json:"condutor"` // Condutor provavelmente será alguma chave privada do usuário
-	Saldo    uint64 `json:"saldo"`    // Saldo da carteira em wei
-}
 
 // DadosCarbonizacao represents vehicle emission data for CO2 calculation
 type DadosCarbonizacao struct {
@@ -243,71 +239,6 @@ func (s *SmartContract) CalculateE1AndTokenize(ctx contractapi.TransactionContex
 	if err != nil {
 		return "", fmt.Errorf("failed to PutState recompensaBytes: %v", err)
 	}
-
-	// Salvar dados detalhados da carbonização
-	dadosCarbonizacao := DadosCarbonizacao{
-		TokenID:           tokenId,
-		VehicleID:         vehicleId,
-		Condutor:          condutor,
-		HighwayDistance:   hwDistance,
-		CityDistance:      ctDistance,
-		EthanolPercent:    ethPercent,
-		CO2EtanolOriginal: co2Original,
-		RoadGasoline:      roadGas,
-		RoadEthanol:       roadEth,
-		CityGasoline:      cityGas,
-		CityEthanol:       cityEth,
-		TanqueGasoline:    tanqueGas,
-		RealPrice:         realPrice,
-		MetaCO2:           metaCO2,
-		Diff:              diff,
-		E2Value:           e2Value,
-		// CarbonPriceEUR:    carbonPrice,
-		// EURBRLRate:        eurBrl,
-		RecompensaEmWei: recompensaEmWei,
-		Timestamp:       timestamp,
-	}
-
-	carbonizacaoBytes, err := json.Marshal(dadosCarbonizacao)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal carbonization data: %v", err)
-	}
-
-	carbonizacaoKey, err := ctx.GetStub().CreateCompositeKey("carbonizacao", []string{tokenId})
-	if err != nil {
-		return "", fmt.Errorf("failed to CreateCompositeKey for carbonizacaoKey: %v", err)
-	}
-
-	err = ctx.GetStub().PutState(carbonizacaoKey, carbonizacaoBytes)
-	if err != nil {
-		return "", fmt.Errorf("failed to PutState carbonizacaoBytes: %v", err)
-	}
-
-	// Atualizar estado do contrato
-	contractStateBytes, err = json.Marshal(contractState)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal updated contract state: %v", err)
-	}
-
-	err = ctx.GetStub().PutState("contractState", contractStateBytes)
-	if err != nil {
-		return "", fmt.Errorf("failed to save updated contract state: %v", err)
-	}
-
-	// Emitir evento de tokenização
-	eventoTokenizacao := map[string]interface{}{
-		"tokenId":        tokenId,
-		"condutor":       condutor,
-		"vehicleId":      vehicleId,
-		"co2Economy":     diff,
-		"recompensaWei":  recompensaEmWei,
-		"carbonPriceEUR": carbonPrice,
-		"eurBrlRate":     eurBrl,
-		"timestamp":      timestamp,
-	}
-
-	eventoBytes, _ := json.Marshal(eventoTokenizacao)
-	ctx.GetStub().SetEvent("CarbonCreditTokenized", eventoBytes)
 
 	return tokenId, nil
 }
