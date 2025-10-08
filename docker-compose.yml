@@ -14,8 +14,7 @@ x-besu-def:
       cp "/config/${BESU_CONS_ALGO:-QBFT}genesis.json" /config/genesis.json
 
       /opt/besu/bin/besu \
-      --min-gas-price=0
-      --config-file=/config/config.toml \
+      --config-file=/config/configu.toml \
       --p2p-host=$$(hostname -i) \
       --rpc-http-api=WEB3,ETH,NET,TRACE,DEBUG,ADMIN,TXPOOL,PERM,${BESU_CONS_ALGO:-QBFT} \
 
@@ -176,7 +175,6 @@ services:
       - -c
       - |
         /opt/besu/bin/besu \
-        --min-gas-price=0
         --config-file=/config/config.toml \
         --p2p-host=$$(hostname -i) \
         --rpc-http-api=WEB3,ETH,NET,TRACE,DEBUG,ADMIN,TXPOOL,PERM,${BESU_CONS_ALGO:-QBFT} \
@@ -206,8 +204,7 @@ services:
       - |
         cp "/config/${BESU_CONS_ALGO:-QBFT}genesis.json" /config/genesis.json  
         /opt/besu/bin/besu \
-        --min-gas-price=0
-        --config-file=/config/config.toml \
+        --config-file=/config/rpcnode-admin-config.toml \
         --p2p-host=$$(hostname -i) \
         --rpc-http-api=WEB3,ETH,NET,TRACE,DEBUG,ADMIN,TXPOOL,PERM,${BESU_CONS_ALGO:-QBFT} \
         --rpc-http-authentication-jwt-public-key-file=/config/publicRSAKey.pem \
@@ -243,8 +240,7 @@ services:
       - |
         cp "/config/${BESU_CONS_ALGO:-QBFT}genesis.json" /config/genesis.json
         /opt/besu/bin/besu \
-        --min-gas-price=0
-        --config-file=/config/config.toml \
+        --config-file=/config/rpcnode-user-config.toml \
         --p2p-host=$$(hostname -i) \
         --rpc-http-api=WEB3,ETH,NET,${BESU_CONS_ALGO:-QBFT} \
     environment:
@@ -268,7 +264,7 @@ services:
     image: consensys/quorum-explorer:${QUORUM_EXPLORER_VERSION:-latest}
     volumes:
       - ./quorum-explorer/config.json:/app/config.json
-      - ./quorum-explorer/env:/app/.env.production
+      - ./quorum-explorer/.env:/app/.env.production
     depends_on:
       - rpcnode-user
     ports:
@@ -276,21 +272,6 @@ services:
     networks:
       besu-network:
        ipv4_address: 172.16.239.31
-
-  
-  # ethsignerProxy:
-  #   << : *ethsignerProxy-def
-  #   volumes:
-  #     - ./config/ethsigner/password:/opt/ethsigner/passwordfile
-  #     - ./config/ethsigner/key:/opt/ethsigner/keyfile
-  #   depends_on:
-  #     - validator1
-  #     - rpcnode-admin
-  #   ports:
-  #     - 18545:8545/tcp
-  #   networks:
-  #     besu-network:
-  #       ipv4_address: 172.16.239.40
 
 
 volumes:
