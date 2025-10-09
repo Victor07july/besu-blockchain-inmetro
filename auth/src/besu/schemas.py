@@ -5,6 +5,7 @@ class BesuStatus(BaseModel):
     status: str
 
 class ContractDeployRequest(BaseModel):
+    private_key: str
     constructor_params: Optional[List[Any]] = []
     gas_limit: Optional[int] = 3000000
     gas_price: Optional[int] = None

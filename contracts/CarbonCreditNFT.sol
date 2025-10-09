@@ -11,13 +11,13 @@ contract CarbonCreditNFT_V1 is ERC721, ReentrancyGuard {
     uint256 public cotacaoEthEmReais;
     uint256 public nextTokenId;
 
-    address public admin;
+    address public admin;QDD
 
     // --- ESTRUTURA DE DADOS DETALHADA ---
     struct ViagemDetalhada {
         uint256 co2MetaG;
         uint256 economiaCO2;
-        uint256 recompensa;
+        uint256 recompensa;Q
         bytes32 dadosHash;
         bool recompensaSacada;
     }

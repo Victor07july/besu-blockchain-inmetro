@@ -2,8 +2,11 @@ FROM python:3.13-bookworm AS builder
 SHELL ["/bin/bash", "-c"] 
 WORKDIR /usr/app
 ENV PYTHONUNBUFFERED=1
-RUN apt-get update && apt-get install -y libmagic-dev
+RUN apt-get update && apt-get install -y libmagic-dev nodejs npm
 COPY . /usr/app
+
+# Instalar OpenZeppelin para compilação de contratos
+RUN npm install -g @openzeppelin/contracts
 
 RUN pip install uv
 RUN uv venv
