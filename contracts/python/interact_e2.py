@@ -10,8 +10,8 @@ from web3.middleware import ExtraDataToPOAMiddleware
 from eth_account import Account
 
 # ===== CONFIGURAÇÕES =====
-# Endereço do contrato que você acabou de fazer deploy
-CONTRACT_ADDRESS = "0x9B8397f1B0FEcD3a1a40CdD5E8221Fa461898517"
+# Endereço do contrato que você acabou de fazer deploy (ATUALIZE AQUI!)
+CONTRACT_ADDRESS = "0x664D6EbAbbD5cf656eD07A509AFfBC81f9615741"
 
 # RPC do Besu
 BESU_RPC_URL = "http://localhost:8547"  # rpcnode-user (SEM autenticação)
@@ -75,34 +75,20 @@ CONTRACT_ABI = [
         "type": "function"
     },
     {
-        "inputs": [{"internalType": "uint256", "name": "tokenId", "type": "uint256"}],
-        "name": "getCalculationDetails",
+        "inputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "name": "tokenCalculations",
         "outputs": [
-            {
-                "components": [
-                    {"internalType": "uint256", "name": "tanqueGasoline", "type": "uint256"},
-                    {"internalType": "uint256", "name": "dtEstradaGasolina", "type": "uint256"},
-                    {"internalType": "uint256", "name": "dtEstradaEtanol", "type": "uint256"},
-                    {"internalType": "uint256", "name": "dfEstrada", "type": "uint256"},
-                    {"internalType": "uint256", "name": "dtCidadeGasolina", "type": "uint256"},
-                    {"internalType": "uint256", "name": "dtCidadeEtanol", "type": "uint256"},
-                    {"internalType": "uint256", "name": "dfCidade", "type": "uint256"},
-                    {"internalType": "uint256", "name": "propBonus", "type": "uint256"},
-                    {"internalType": "uint256", "name": "e2Final", "type": "uint256"},
-                    {"internalType": "uint256", "name": "totalDistance", "type": "uint256"}
-                ],
-                "internalType": "struct CarbonCreditNFT_E2Calculator.CalculationResult",
-                "name": "",
-                "type": "tuple"
-            }
+            {"internalType": "uint256", "name": "tanqueGasoline", "type": "uint256"},
+            {"internalType": "uint256", "name": "dtEstradaGasolina", "type": "uint256"},
+            {"internalType": "uint256", "name": "dtEstradaEtanol", "type": "uint256"},
+            {"internalType": "uint256", "name": "dfEstrada", "type": "uint256"},
+            {"internalType": "uint256", "name": "dtCidadeGasolina", "type": "uint256"},
+            {"internalType": "uint256", "name": "dtCidadeEtanol", "type": "uint256"},
+            {"internalType": "uint256", "name": "dfCidade", "type": "uint256"},
+            {"internalType": "uint256", "name": "propBonus", "type": "uint256"},
+            {"internalType": "uint256", "name": "e2Final", "type": "uint256"},
+            {"internalType": "uint256", "name": "totalDistance", "type": "uint256"}
         ],
-        "stateMutability": "view",
-        "type": "function"
-    },
-    {
-        "inputs": [],
-        "name": "getContractBalance",
-        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
         "stateMutability": "view",
         "type": "function"
     },
@@ -176,11 +162,11 @@ async def main():
     next_token = await contract.functions.nextTokenId().call()
     print(f"Próximo Token ID: {next_token}")
     
-    # 3. Verificar saldo do contrato
+    # 3. Verificar saldo do contrato (usando eth.get_balance)
     print("\n" + "=" * 80)
     print("3️⃣ VERIFICANDO SALDO DO CONTRATO")
     print("=" * 80)
-    contract_balance = await contract.functions.getContractBalance().call()
+    contract_balance = await w3.eth.get_balance(CONTRACT_ADDRESS)
     print(f"Saldo: {w3.from_wei(contract_balance, 'ether')} ETH")
     
     # 4. Autorizar sua conta (se você for owner)
@@ -278,12 +264,12 @@ async def main():
                 print(f"📈 Valor E2: {e2_value / 1_000_000:.2f}")
                 print(f"🛣️  Distância total: {total_distance / 1_000_000:.2f} km")
                 
-                # 6. Buscar detalhes do cálculo
+                # 6. Buscar detalhes do cálculo (usando mapping tokenCalculations)
                 print("\n" + "=" * 80)
                 print("6️⃣ DETALHES DO CÁLCULO")
                 print("=" * 80)
                 
-                details = await contract.functions.getCalculationDetails(token_id).call()
+                details = await contract.functions.tokenCalculations(token_id).call()
                 print(f"Tanque gasolina: {details[0] / 1_000_000:.2f}%")
                 print(f"Custo estrada: {details[3] / 1_000_000:.6f} BRL")
                 print(f"Custo cidade: {details[6] / 1_000_000:.6f} BRL")

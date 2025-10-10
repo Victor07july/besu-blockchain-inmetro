@@ -5,8 +5,10 @@ ENV PYTHONUNBUFFERED=1
 RUN apt-get update && apt-get install -y libmagic-dev nodejs npm
 COPY . /usr/app
 
-# Instalar OpenZeppelin para compilação de contratos
-RUN npm install -g @openzeppelin/contracts
+# Instalar bibliotecas Solidity para compilação de contratos
+RUN npm install -g @openzeppelin/contracts@4.9.6
+# Adicione mais bibliotecas aqui se necessário:
+# RUN npm install -g @chainlink/contracts@0.8.0
 
 RUN pip install uv
 RUN uv venv

@@ -35,6 +35,13 @@ async def compile_solidity_contract(contract_file: UploadFile) -> ContractCompil
         pragma_match = re.search(r'pragma\s+solidity\s+[\^~]?([0-9]+\.[0-9]+\.[0-9]+)', source_code)
         if pragma_match:
             solc_version = pragma_match.group(1)
+            
+            # LIMITAR VERSÃO MÁXIMA: Solidity 0.8.20+ não é compatível com Besu
+            # (usa PUSH0 opcode do Shanghai EVM que Besu não suporta)
+            version_parts = list(map(int, solc_version.split('.')))
+            if version_parts[0] == 0 and version_parts[1] == 8 and version_parts[2] >= 20:
+                solc_version = "0.8.19"  # Downgrade para versão compatível
+                print(f"⚠️ Versão {pragma_match.group(1)} não compatível com Besu. Usando 0.8.19")
         else:
             # Tentar detectar apenas major.minor
             pragma_match = re.search(r'pragma\s+solidity\s+[\^~]?([0-9]+\.[0-9]+)', source_code)
@@ -50,7 +57,7 @@ async def compile_solidity_contract(contract_file: UploadFile) -> ContractCompil
                 elif version_parts.startswith('0.7'):
                     solc_version = "0.7.6"   # Última versão 0.7.x
                 elif version_parts.startswith('0.8'):
-                    solc_version = "0.8.19"  # Versão estável 0.8.x
+                    solc_version = "0.8.19"  # Versão estável 0.8.x (máximo compatível com Besu)
                 else:
                     solc_version = "0.8.19"  # Versão padrão
             else:
@@ -74,9 +81,12 @@ async def compile_solidity_contract(contract_file: UploadFile) -> ContractCompil
         
         # Compilar o contrato
         try:
-            # Configurar remappings para OpenZeppelin (formato correto para py-solc-x)
+            # Configurar remappings para bibliotecas Solidity (formato correto para py-solc-x)
             import_remappings = [
-                '@openzeppelin/contracts=/usr/local/lib/node_modules/@openzeppelin/contracts'
+                '@openzeppelin/contracts=/usr/local/lib/node_modules/@openzeppelin/contracts',
+                # Adicione mais bibliotecas aqui conforme necessário:
+                # '@chainlink/contracts=/usr/local/lib/node_modules/@chainlink/contracts',
+                # '@uniswap/v3-core=/usr/local/lib/node_modules/@uniswap/v3-core',
             ]
             
             # Tentar compilar com remappings
