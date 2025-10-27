@@ -25,6 +25,11 @@ To run this project in production, other files need to be removed from git, like
     - [iii. Smart Contracts \& DApps ](#iii-smart-contracts--dapps-)
   - [Moving to production](#moving-to-production)
   - [Security Proposal](#security-proposal)
+- [Configurations](#configurations)
+  - [Environment Variables](#environment-variables)
+  - [Cryptographic Keys](#cryptographic-keys)
+  - [Certificate](#certificate)
+- [Postman Collection](#postman-collection)
 
 ## Prerequisites
 
@@ -241,3 +246,37 @@ Another important change in this proposal is the creation of two RPC nodes one t
 <p align="center">
   <img src="./static/Besu-security-proposal.png" alt="Besu Security Proposal"/>
 </p>
+
+# Configurations
+
+To run the project properly it is important to configure the environment variables, cryptographic keys and certificate. 
+
+## Environment Variables
+The files `.env.exmaple` provide examples of the required configurations for each service. Following is a list of the files that you can copy and create your `.env` file.
+
+1. `./.env.example` at the root of the project
+2. `./quorum-explorer/.env.example` 
+3. `./config/besu/.env.example`
+4. `./auth/src/config/.env.example`
+
+## Cryptographic Keys
+
+Fist, we must configure the cryptographic keys, secrets and token duration due to the JWT authentication schema in the comunication between authentication and RPC-admin services, and to control users access. 
+First, Besu nodes were configured to use RSA keys to sign the JSON web tokens. To create a pair of keys you can run the following commands:
+
+```shell
+openssl genrsa -out privateRSAKey.pem 4096
+openssl rsa -in privateRSAKey.pem -pubout -out publicRSAKey.pem
+mv publicRSAKey.pem ./config/besu/publicRSAKey.pem
+```
+
+Lastly, The private key must be set as environment variable inside `./auth/src/config/.env.example` as `BESU_JWT_PRIVATE_KEY`.
+
+
+## Certificate
+The Nginx service needs a certificate to operate with HTTPS, without it the service will not start. If you don't have a certificate yet, you can check the instruction on [Nginx README](./config/nginx/README.MD) about how to generate an autosigned certificate.
+
+
+# Postman Collection
+
+To help test the platform we developed a Postman Collection that can be imported using the file `besu-starter.postman_collection.json`. For now, we provide requests to sign in and sign up users, and to test the connection with the Besu blockchain. We will provide more examples and update the collection as we develop new endpoints.
