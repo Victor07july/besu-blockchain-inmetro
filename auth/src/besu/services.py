@@ -5,7 +5,10 @@ from web3 import AsyncWeb3
 from web3.exceptions import ContractLogicError, TransactionNotFound
 from fastapi import UploadFile, HTTPException
 
-from src.besu.schemas import ContractDeployResponse, ContractCompilationResponse
+from src.besu.schemas import (
+    ContractCompilationResponse,
+    SignedTransactionResponse
+)
 
 
 async def is_besu_connected(w3: AsyncWeb3):
@@ -156,166 +159,129 @@ async def compile_solidity_contract(contract_file: UploadFile) -> ContractCompil
         )
 
 
-async def deploy_contract(
+async def broadcast_signed_transaction(
     w3: AsyncWeb3,
-    abi: List[Dict],
-    bytecode: str,
-    private_key: str,
-    constructor_params: List[Any] = None,
-    gas_limit: int = 3000000,
-    gas_price: Optional[int] = None
-) -> ContractDeployResponse:
+    signed_transaction: str
+) -> SignedTransactionResponse:
     """
-    Realiza o deploy de um contrato compilado na blockchain Besu
+    Faz broadcast de uma transação já assinada localmente pelo cliente.
+    
+    Esta é a forma SEGURA de fazer deploy, pois:
+    - A chave privada NUNCA trafega na rede
+    - A assinatura é feita localmente pelo cliente
+    - O servidor apenas faz broadcast da transação
+    
+    Args:
+        w3: Cliente Web3 conectado ao Besu
+        signed_transaction: Raw transaction assinada em hexadecimal
+        
+    Returns:
+        SignedTransactionResponse com endereço do contrato e hash da transação
     """
     try:
-        from eth_account import Account
-        
         # Verificar conexão
         if not await w3.is_connected():
-            return ContractDeployResponse(
+            return SignedTransactionResponse(
                 success=False,
                 error_message="Não foi possível conectar ao Besu"
             )
         
-        # Validar chave privada
-        if not private_key:
-            return ContractDeployResponse(
+        # Validar formato da transação
+        if not signed_transaction:
+            return SignedTransactionResponse(
                 success=False,
-                error_message="Chave privada não fornecida"
+                error_message="Transação assinada não fornecida"
             )
         
         # Adicionar '0x' se necessário
-        if not private_key.startswith('0x'):
-            private_key = '0x' + private_key
+        if not signed_transaction.startswith('0x'):
+            signed_transaction = '0x' + signed_transaction
         
-        # Obter conta a partir da chave privada
+        # Validar que é um hex válido
         try:
-            account = Account.from_key(private_key)
-            from_account = account.address
-        except Exception as e:
-            return ContractDeployResponse(
+            bytes.fromhex(signed_transaction[2:])
+        except ValueError:
+            return SignedTransactionResponse(
                 success=False,
-                error_message=f"Chave privada inválida: {str(e)}"
+                error_message="Transação assinada deve estar em formato hexadecimal válido"
             )
         
-        # Preparar parâmetros do construtor
-        if constructor_params is None:
-            constructor_params = []
+        # Enviar transação assinada para a rede
+        try:
+            tx_hash = await w3.eth.send_raw_transaction(signed_transaction)
+        except ValueError as e:
+            # Erros comuns: nonce incorreto, gas insuficiente, etc.
+            error_msg = str(e)
+            if "nonce" in error_msg.lower():
+                return SignedTransactionResponse(
+                    success=False,
+                    error_message=f"Erro de nonce: {error_msg}. Verifique se o nonce está correto."
+                )
+            elif "gas" in error_msg.lower():
+                return SignedTransactionResponse(
+                    success=False,
+                    error_message=f"Erro de gas: {error_msg}. Verifique o gas_limit."
+                )
+            elif "balance" in error_msg.lower() or "funds" in error_msg.lower():
+                return SignedTransactionResponse(
+                    success=False,
+                    error_message=f"Saldo insuficiente: {error_msg}"
+                )
+            else:
+                return SignedTransactionResponse(
+                    success=False,
+                    error_message=f"Erro ao enviar transação: {error_msg}"
+                )
         
-        # Criar contrato
-        contract = w3.eth.contract(abi=abi, bytecode=bytecode)
+        # Aguardar confirmação da transação
+        try:
+            tx_receipt = await w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+        except Exception as e:
+            return SignedTransactionResponse(
+                success=False,
+                transaction_hash=tx_hash.hex(),
+                error_message=f"Transação enviada mas timeout ao aguardar confirmação: {str(e)}"
+            )
         
-        # Obter valores necessários primeiro
-        current_gas_price = gas_price or await w3.eth.gas_price
-        current_nonce = await w3.eth.get_transaction_count(from_account)
-        current_chain_id = await w3.eth.chain_id
-        
-        # Preparar transação de deploy (await para AsyncWeb3)
-        transaction = await contract.constructor(*constructor_params).build_transaction({
-            'from': from_account,
-            'gas': gas_limit,
-            'gasPrice': current_gas_price,
-            'nonce': current_nonce,
-            'chainId': current_chain_id,
-        })
-        
-        # Assinar transação localmente
-        signed_txn = account.sign_transaction(transaction)
-        
-        # Enviar transação assinada
-        tx_hash = await w3.eth.send_raw_transaction(signed_txn.raw_transaction)
-        
-        # Aguardar confirmação
-        tx_receipt = await w3.eth.wait_for_transaction_receipt(tx_hash)
-        
-        # Verificar se o deploy foi bem-sucedido
+        # Verificar se a transação foi bem-sucedida
         if tx_receipt.status == 1:
-            return ContractDeployResponse(
+            # Verificar se é um deploy de contrato (tem contractAddress)
+            contract_address = tx_receipt.contractAddress if hasattr(tx_receipt, 'contractAddress') else None
+            
+            return SignedTransactionResponse(
                 success=True,
-                contract_address=tx_receipt.contractAddress,
+                contract_address=contract_address,
                 transaction_hash=tx_hash.hex(),
                 gas_used=tx_receipt.gasUsed
             )
         else:
-            # Deploy falhou - coletar informações detalhadas
-            error_details = {
-                'status': tx_receipt.status,
-                'gasUsed': tx_receipt.gasUsed,
-                'gasLimit': gas_limit,
-                'blockNumber': tx_receipt.blockNumber,
-                'transactionHash': tx_hash.hex()
-            }
+            # Transação revertida
+            gas_used = tx_receipt.gasUsed
             
-            # Verificar se ficou sem gas
-            if tx_receipt.gasUsed >= gas_limit * 0.95:
-                error_msg = f"Out of Gas: usou {tx_receipt.gasUsed}/{gas_limit} gas. Aumente o gas_limit para pelo menos {int(gas_limit * 1.5)}"
-            else:
-                error_msg = f"Transação revertida (status=0). Gas usado: {tx_receipt.gasUsed}/{gas_limit}. Possível erro no construtor do contrato."
+            # Tentar obter informações da transação original
+            try:
+                tx = await w3.eth.get_transaction(tx_hash)
+                gas_limit = tx.gas
+                
+                # Verificar se ficou sem gas
+                if gas_used >= gas_limit * 0.95:
+                    error_msg = f"Out of Gas: usou {gas_used}/{gas_limit} gas. Aumente o gas_limit para pelo menos {int(gas_limit * 1.5)}"
+                else:
+                    error_msg = f"Transação revertida (status=0). Gas usado: {gas_used}/{gas_limit}. Possível erro no construtor do contrato."
+            except Exception:
+                error_msg = f"Transação revertida (status=0). Gas usado: {gas_used}"
             
-            return ContractDeployResponse(
+            return SignedTransactionResponse(
                 success=False,
                 error_message=error_msg,
-                gas_used=tx_receipt.gasUsed,
+                gas_used=gas_used,
                 transaction_hash=tx_hash.hex()
             )
             
-    except ContractLogicError as e:
-        return ContractDeployResponse(
-            success=False,
-            error_message=f"Erro de lógica do contrato: {str(e)}"
-        )
     except Exception as e:
-        return ContractDeployResponse(
+        return SignedTransactionResponse(
             success=False,
-            error_message=f"Erro durante deploy: {str(e)}"
+            error_message=f"Erro interno ao fazer broadcast: {str(e)}"
         )
 
-
-async def compile_and_deploy_contract(
-    contract_file: UploadFile,
-    w3: AsyncWeb3,
-    private_key: str,
-    constructor_params: List[Any] = None,
-    gas_limit: int = 3000000,
-    gas_price: Optional[int] = None
-) -> ContractDeployResponse:
-    """
-    Função principal que compila e realiza o deploy de um contrato
-    """
-    try:
-        # Reset file pointer
-        await contract_file.seek(0)
-        
-        # Compilar contrato
-        compilation_result = await compile_solidity_contract(contract_file)
-        
-        if not compilation_result.success:
-            return ContractDeployResponse(
-                success=False,
-                error_message=f"Falha na compilação: {compilation_result.error_message}",
-                compilation_output=compilation_result.dict()
-            )
-        
-        # Deploy contrato
-        deploy_result = await deploy_contract(
-            w3=w3,
-            abi=compilation_result.abi,
-            bytecode=compilation_result.bytecode,
-            private_key=private_key,
-            constructor_params=constructor_params,
-            gas_limit=gas_limit,
-            gas_price=gas_price
-        )
-        
-        # Adicionar informações de compilação ao resultado
-        deploy_result.compilation_output = compilation_result.dict()
-        
-        return deploy_result
-        
-    except Exception as e:
-        return ContractDeployResponse(
-            success=False,
-            error_message=f"Erro geral: {str(e)}"
-        )
 
