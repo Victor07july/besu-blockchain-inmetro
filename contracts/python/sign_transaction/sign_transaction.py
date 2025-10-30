@@ -26,74 +26,74 @@ PRIVATE_KEY = "8f2a55949038a9610f50fb23b5883af3b4ecb3c3bb792cbcefbd1542c692be63"
 # Cole aqui o ABI que você recebeu do /compile-contract/
 ABI = [
     {
-        "inputs": [
-            {
-                "internalType": "uint256",
-                "name": "_initialValue",
-                "type": "uint256"
-            }
-        ],
-        "stateMutability": "nonpayable",
-        "type": "constructor"
-    },
-    {
-        "anonymous": False,
-        "inputs": [
-            {
-                "indexed": True,
-                "internalType": "address",
-                "name": "sender",
-                "type": "address"
-            },
-            {
-                "indexed": False,
-                "internalType": "uint256",
-                "name": "value",
-                "type": "uint256"
-            }
-        ],
-        "name": "DataStored",
-        "type": "event"
-    },
-    {
-        "inputs": [],
-        "name": "get",
-        "outputs": [
-            {
-                "internalType": "uint256",
-                "name": "",
-                "type": "uint256"
-            }
-        ],
-        "stateMutability": "view",
-        "type": "function"
-    },
-    {
-        "inputs": [
-            {
-                "internalType": "uint256",
-                "name": "_value",
-                "type": "uint256"
-            }
-        ],
-        "name": "set",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function"
-    },
-    {
-        "inputs": [],
-        "name": "storedData",
-        "outputs": [
-            {
-                "internalType": "uint256",
-                "name": "",
-                "type": "uint256"
-            }
-        ],
-        "stateMutability": "view",
-        "type": "function"
-    }
+"inputs": [
+                {
+                    "internalType": "uint256",
+                    "name": "_initialValue",
+                    "type": "uint256"
+                }
+            ],
+            "stateMutability": "nonpayable",
+            "type": "constructor"
+        },
+        {
+            "anonymous": "false",
+            "inputs": [
+                {
+                    "indexed": "true",
+                    "internalType": "address",
+                    "name": "sender",
+                    "type": "address"
+                },
+                {
+                    "indexed": "false",
+                    "internalType": "uint256",
+                    "name": "value",
+                    "type": "uint256"
+                }
+            ],
+            "name": "DataStored",
+            "type": "event"
+        },
+        {
+            "inputs": [],
+            "name": "get",
+            "outputs": [
+                {
+                    "internalType": "uint256",
+                    "name": "",
+                    "type": "uint256"
+                }
+            ],
+            "stateMutability": "view",
+            "type": "function"
+        },
+        {
+            "inputs": [
+                {
+                    "internalType": "uint256",
+                    "name": "_value",
+                    "type": "uint256"
+                }
+            ],
+            "name": "set",
+            "outputs": [],
+            "stateMutability": "nonpayable",
+            "type": "function"
+        },
+        {
+            "inputs": [],
+            "name": "storedData",
+            "outputs": [
+                {
+                    "internalType": "uint256",
+                    "name": "",
+                    "type": "uint256"
+                }
+            ],
+            "stateMutability": "view",
+            "type": "function"
+        }
 ]
 
 # Cole aqui o BYTECODE que você recebeu do /compile-contract/
@@ -104,7 +104,7 @@ BYTECODE = "608060405234801561001057600080fd5b506040516102fb3803806102fb83398181
 CONSTRUCTOR_PARAMS = [42]  # Valor inicial = 42
 
 # Configurações de gas
-GAS_LIMIT = 3000000  # 3 milhões (ajuste se necessário)
+GAS_LIMIT = 300  # 3 milhões (ajuste se necessário)
 
 # ===========================
 # SCRIPT

@@ -1,35 +1,5 @@
 # Arquiteturas de Deploy Seguro
 
-Este diretório contém exemplos de diferentes abordagens para fazer deploy de contratos, desde a menos segura (legada) até a mais segura (totalmente local).
-
-## 🔐 Níveis de Segurança
-
-### ❌ Abordagem 1: Deploy com Chave Privada na API (NÃO RECOMENDADO)
-
-**Rota:** `POST /api/v1/besu/deploy-contract/`
-
-**Como funciona:**
-- Cliente envia arquivo `.sol` + chave privada para a API
-- API compila, assina e faz deploy
-- **PROBLEMA:** Chave privada trafega na rede
-
-**Quando usar:**
-- Apenas para desenvolvimento/testes locais
-- NUNCA em produção
-- NUNCA com chaves de contas reais
-
-```bash
-# Exemplo de requisição
-curl -X POST http://localhost:8000/api/v1/besu/deploy-contract/ \
-  -H "Authorization: Bearer $JWT_TOKEN" \
-  -F "contract_file=@SimpleStorage.sol" \
-  -F "private_key=8f2a5594903..." \
-  -F "gas_limit=3000000"
-```
-
----
-
-### ✅ Abordagem 2: Deploy com Transação Assinada (RECOMENDADO)
 
 **Rotas:**
 1. `POST /api/v1/besu/compile-contract/` - Compila e retorna bytecode
@@ -110,42 +80,6 @@ Cliente                    API                      Besu
   | [4] Envia diretamente------------------------>|
   |<--------------receipt---------------------------|
 ```
-
----
-
-## 📊 Comparação das Abordagens
-
-| Característica | Abordagem 1<br>(Legada) | Abordagem 2<br>(Assinatura) | Abordagem 3<br>(Local) |
-|---|:---:|:---:|:---:|
-| **Chave privada na rede** | ❌ Sim | ✅ Não | ✅ Não |
-| **API armazena chaves** | Possível | ✅ Não | ✅ Não |
-| **Compatível com hardware wallet** | ❌ Não | ✅ Sim | ✅ Sim |
-| **Compatível com MetaMask** | ❌ Não | ✅ Sim | ✅ Sim |
-| **Depende da API para deploy** | Sim | Sim | ✅ Não |
-| **Nível de segurança** | 🔴 Baixo | 🟢 Alto | 🟢 Muito Alto |
-| **Complexidade** | Baixa | Média | Média |
-| **Recomendado para produção** | ❌ Não | ✅ Sim | ✅ Sim |
-
----
-
-## 🚀 Como Escolher
-
-### Use Abordagem 1 se:
-- Está fazendo testes rápidos localmente
-- Não importa se a chave vazar (conta de teste)
-- Quer simplicidade máxima
-
-### Use Abordagem 2 se:
-- Quer segurança em produção
-- Precisa centralizar logs de deploy na API
-- Quer compatibilidade com carteiras
-- Precisa de auditoria/controle via API
-
-### Use Abordagem 3 se:
-- Quer máxima segurança
-- Não confia 100% na API
-- Quer controle total do processo
-- Tem acesso direto ao RPC do Besu
 
 ---
 
