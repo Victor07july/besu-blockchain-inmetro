@@ -243,7 +243,7 @@ async def broadcast_signed_transaction(
             return SignedTransactionResponse(
                 success=False,
                 transaction_hash=tx_hash.hex(),
-                error_message=f"Transação enviada mas timeout ao aguardar confirmação: {str(e)}"
+                error_message=f"Transação enviada mas ocorreu timeout ao aguardar confirmação: {str(e)}"
             )
         
         # Verificar se a transação foi bem-sucedida
@@ -284,7 +284,7 @@ async def broadcast_signed_transaction(
     except Exception as e:
         return SignedTransactionResponse(
             success=False,
-            error_message=f"Erro interno ao fazer broadcast: {str(e)}"
+            error_message=f"Erro interno durante deploy: {str(e)}"
         )
 
 
