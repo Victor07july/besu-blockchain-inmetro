@@ -280,3 +280,9 @@ The Nginx service needs a certificate to operate with HTTPS, without it the serv
 # Postman Collection
 
 To help test the platform we developed a Postman Collection that can be imported using the file `besu-starter.postman_collection.json`. For now, we provide requests to sign in and sign up users, and to test the connection with the Besu blockchain. We will provide more examples and update the collection as we develop new endpoints.
+
+## Contract Deployment via API
+
+The platform provides endpoints for compiling and deploying Solidity smart contracts. For detailed instructions on how to deploy contracts via Postman, including both direct deployment and signed transaction methods, refer to the [Contract Deployment Guide](./auth/README.md).
+
+

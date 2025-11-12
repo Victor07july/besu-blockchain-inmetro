@@ -178,7 +178,9 @@ def main():
     estimated_cost_wei = GAS_LIMIT * gas_price
     estimated_cost_eth = w3.from_wei(estimated_cost_wei, 'ether')
     print(f"   Custo estimado (máximo): {estimated_cost_eth} ETH")
-    
+
+
+    # Essa parte que a rota deveria retornar
     # Montar transação
     transaction = {
         'from': deployer_address,

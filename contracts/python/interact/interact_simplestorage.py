@@ -20,7 +20,7 @@ from eth_account import Account
 CONTRACT_ADDRESS = "0x4245CF4518CB2C280f5e9c6a03c90C147F80B4d9"
 
 # RPC do Besu
-BESU_RPC_URL = "http://localhost:8547"
+BESU_RPC_URL = "http://localhost/user/"
 
 # Sua chave privada (para enviar transações)
 PRIVATE_KEY = "8f2a55949038a9610f50fb23b5883af3b4ecb3c3bb792cbcefbd1542c692be63"
@@ -180,17 +180,17 @@ async def main():
     print("=" * 70)
     
     # Conectar ao Besu
-    print(f"\n📡 Conectando ao Besu em {BESU_RPC_URL}...")
+    print(f"\n Conectando ao Besu em {BESU_RPC_URL}...")
     w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(BESU_RPC_URL))
     
     # Adicionar middleware para Besu (PoA)
     w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
     
     if not await w3.is_connected():
-        print("❌ Não foi possível conectar ao Besu!")
+        print(" Não foi possível conectar ao Besu!")
         return
     
-    print(f"✅ Conectado! Chain ID: {await w3.eth.chain_id}")
+    print(f" Conectado! Chain ID: {await w3.eth.chain_id}")
     
     # Criar conta
     account = Account.from_key(PRIVATE_KEY)

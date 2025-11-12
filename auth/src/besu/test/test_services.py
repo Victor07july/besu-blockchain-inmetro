@@ -337,6 +337,9 @@ class TestCompileSolidityContract:
         """
         Cenário: Compilação bem-sucedida de contrato simples
         Resultado esperado: success=True, abi e bytecode presentes
+        
+        Nota: Este teste foca apenas na compilação (services.py).
+        A montagem do objeto 'transaction' é testada em test_routes.py
         """
         # Arrange
         mock_file = MagicMock()
@@ -363,6 +366,9 @@ class TestCompileSolidityContract:
         assert result.abi is not None
         assert result.bytecode is not None
         assert len(result.bytecode) > 0
+        # transaction não é responsabilidade desta função
+        assert result.transaction is None
+        assert result.error_message is None
     
     @patch('solcx.compile_source')
     @patch('solcx.install_solc')

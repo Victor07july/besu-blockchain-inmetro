@@ -3,21 +3,18 @@ pragma solidity ^0.8.10;
 
 import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
  * @title CarbonCreditNFT_E2Calculator
- * @dev Contrato adaptado do código R - Partes 2 e 3
+ * @dev Contrato adaptado do código R - Parte 2
  *
- * PARTE 2 - CALCULANDO O VALOR DE E2:
+ * CALCULANDO O VALOR DE E2:
  * 1. Distância Estrada (gasolina + etanol)
  * 2. Distância Cidade (gasolina + etanol)
  * 3. Bônus de dirigibilidade (Prop_Bonus)
  * 4. E2 = Prop_Bonus * (df_estrada + df_cidade)
- *
- * PARTE 3 - EVENTOS PARA TRACKING:
- * Eventos emitidos para permitir análise off-chain dos valores E2
  */
 contract CarbonCreditNFT_E2Calculator is
     ERC721,
@@ -51,25 +48,8 @@ contract CarbonCreditNFT_E2Calculator is
         uint256 dfCidade; // df_cidade = sum acima
         uint256 propBonus; // Prop_Bonus (multiplicador)
         uint256 e2Final; // E2 = Prop_Bonus * (df_estrada + df_cidade)
-        uint256 totalDistance; // total_distance para tracking
+        uint256 totalDistance;
     }
-
-    // === EVENTOS (Parte 3 - para tracking e análise) ===
-    event E2Calculated(
-        address indexed user,
-        uint256 indexed tokenId,
-        uint256 e2Value,
-        uint256 totalDistance,
-        uint256 timestamp
-    );
-
-    event E2DetailedCalculation(
-        uint256 indexed tokenId,
-        uint256 dfEstrada,
-        uint256 dfCidade,
-        uint256 propBonus,
-        uint256 tanqueGasoline
-    );
 
     // === ESTADO DO CONTRATO ===
     uint256 private _nextTokenId = 1;
@@ -86,7 +66,7 @@ contract CarbonCreditNFT_E2Calculator is
     }
 
     // === CONSTRUTOR ===
-    constructor() ERC721("CarbonCreditE2", "CCE2") Ownable(msg.sender) {
+    constructor() ERC721("CarbonCreditE2", "CCE2") {
         authorized[msg.sender] = true;
     }
 
@@ -122,22 +102,6 @@ contract CarbonCreditNFT_E2Calculator is
         // Armazenar resultado
         tokenCalculations[tokenId] = result;
         e2Value = result.e2Final;
-
-        // PARTE 3: Emitir eventos para tracking
-        emit E2Calculated(
-            recipient,
-            tokenId,
-            e2Value,
-            result.totalDistance,
-            block.timestamp
-        );
-        emit E2DetailedCalculation(
-            tokenId,
-            result.dfEstrada,
-            result.dfCidade,
-            result.propBonus,
-            result.tanqueGasoline
-        );
 
         return (tokenId, e2Value);
     }
@@ -207,38 +171,9 @@ contract CarbonCreditNFT_E2Calculator is
         uint256 totalDistanceCost = result.dfEstrada + result.dfCidade;
         result.e2Final = (result.propBonus * totalDistanceCost) / 1e6; // Ajustar escala
 
-        // Para tracking (Parte 3)
         result.totalDistance = params.highwayDistance + params.cityDistance;
 
         return result;
-    }
-
-    // === FUNÇÕES DE VISUALIZAÇÃO ===
-    function getCalculationDetails(
-        uint256 tokenId
-    ) external view returns (CalculationResult memory) {
-        require(_ownerOf(tokenId) != address(0), "Token nao existe");
-        return tokenCalculations[tokenId];
-    }
-
-    function simulateE2Calculation(
-        CalculationParams memory params
-    ) external pure returns (CalculationResult memory) {
-        return _performCalculations(params);
-    }
-
-    // Função para obter múltiplos cálculos (útil para análise como na Parte 3)
-    function getBatchCalculations(
-        uint256[] memory tokenIds
-    ) external view returns (CalculationResult[] memory) {
-        CalculationResult[] memory results = new CalculationResult[](
-            tokenIds.length
-        );
-        for (uint256 i = 0; i < tokenIds.length; i++) {
-            require(_ownerOf(tokenIds[i]) != address(0), "Token nao existe");
-            results[i] = tokenCalculations[tokenIds[i]];
-        }
-        return results;
     }
 
     // === FUNÇÕES ADMINISTRATIVAS ===
