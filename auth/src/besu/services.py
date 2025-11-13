@@ -15,6 +15,117 @@ async def is_besu_connected(w3: AsyncWeb3):
     return {"status": "ok"} if await w3.is_connected() else {"status": "error"}
 
 
+async def prepare_deployment_transaction(
+    w3: AsyncWeb3,
+    compilation_result: ContractCompilationResponse,
+    deployer_address: str,
+    constructor_params_json: str,
+    gas_limit: int
+) -> ContractCompilationResponse:
+    """
+    Prepara uma transação de deployment completa a partir de um contrato compilado.
+    
+    Esta função encapsula toda a lógica de:
+    - Parsing e validação dos parâmetros do construtor
+    - Validação e conversão do endereço do deployer
+    - Encodar o construtor do contrato
+    - Buscar informações da rede (nonce, gas_price, chain_id)
+    - Montar o objeto de transação completo
+    
+    Args:
+        w3: Cliente Web3 conectado ao Besu
+        compilation_result: Resultado da compilação do contrato (com abi e bytecode)
+        deployer_address: Endereço que fará o deploy
+        constructor_params_json: String JSON com parâmetros do construtor. Ex: "[42]" ou "[]"
+        gas_limit: Limite de gas para a transação
+        
+    Returns:
+        ContractCompilationResponse com success=True e transaction preenchida, ou
+        ContractCompilationResponse com success=False e error_message
+    """
+    import json
+    
+    # 1. Validar se a compilação foi bem-sucedida
+    if not compilation_result.success:
+        return compilation_result
+    
+    # 2. Parsear constructor_params (vem como JSON string)
+    try:
+        params = json.loads(constructor_params_json)
+        if not isinstance(params, list):
+            return ContractCompilationResponse(
+                success=False,
+                error_message="constructor_params deve ser um array JSON. Ex: [42] ou []"
+            )
+    except json.JSONDecodeError as e:
+        return ContractCompilationResponse(
+            success=False,
+            error_message=f"Erro ao parsear constructor_params: {str(e)}"
+        )
+    
+    # 3. Validar e converter deployer_address para checksum
+    if not deployer_address or not deployer_address.startswith('0x'):
+        return ContractCompilationResponse(
+            success=False,
+            error_message="deployer_address inválido. Deve começar com 0x"
+        )
+    
+    try:
+        deployer_address = w3.to_checksum_address(deployer_address)
+    except Exception as e:
+        return ContractCompilationResponse(
+            success=False,
+            error_message=f"deployer_address inválido: {str(e)}"
+        )
+    
+    # 4. Criar contrato e encodar construtor com os parâmetros
+    try:
+        contract = w3.eth.contract(
+            abi=compilation_result.abi,
+            bytecode=compilation_result.bytecode
+        )
+        
+        if params:
+            # Encodar construtor com parâmetros
+            data = contract.constructor(*params).data_in_transaction
+        else:
+            # Sem parâmetros, apenas bytecode
+            bytecode = compilation_result.bytecode
+            if not bytecode.startswith('0x'):
+                bytecode = '0x' + bytecode
+            data = bytecode
+        
+        # 5. Buscar informações da rede para montar a transação
+        nonce = await w3.eth.get_transaction_count(deployer_address)
+        gas_price = await w3.eth.gas_price
+        chain_id = await w3.eth.chain_id
+        
+        # 6. Montar objeto transaction
+        transaction = {
+            'from': deployer_address,
+            'nonce': nonce,
+            'gas': gas_limit,
+            'gasPrice': gas_price,
+            'data': data,
+            'chainId': chain_id,
+            'value': 0
+        }
+        
+        # 7. Retornar compilação + transação pronta
+        return ContractCompilationResponse(
+            success=True,
+            abi=compilation_result.abi,
+            bytecode=compilation_result.bytecode,
+            transaction=transaction,
+        )
+        
+    except Exception as e:
+        return ContractCompilationResponse(
+            success=False,
+            error_message=f"Erro ao preparar transação: {str(e)}"
+        )
+
+
 async def compile_solidity_contract(contract_file: UploadFile) -> ContractCompilationResponse:
     """
     Compila um contrato Solidity usando py-solc-x (compilador Python)

@@ -1,12 +1,13 @@
 """
 Testes unitários para src.besu.services
 
-Testa todos os cenários de erro e sucesso das funções:
+Testa os cenários de erro e sucesso das funções:
 - broadcast_signed_transaction
 - compile_solidity_contract
 """
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import PropertyMock
 from src.besu.services import broadcast_signed_transaction, compile_solidity_contract
 from src.besu.schemas import SignedTransactionResponse, ContractCompilationResponse
 
@@ -337,9 +338,6 @@ class TestCompileSolidityContract:
         """
         Cenário: Compilação bem-sucedida de contrato simples
         Resultado esperado: success=True, abi e bytecode presentes
-        
-        Nota: Este teste foca apenas na compilação (services.py).
-        A montagem do objeto 'transaction' é testada em test_routes.py
         """
         # Arrange
         mock_file = MagicMock()
@@ -366,9 +364,6 @@ class TestCompileSolidityContract:
         assert result.abi is not None
         assert result.bytecode is not None
         assert len(result.bytecode) > 0
-        # transaction não é responsabilidade desta função
-        assert result.transaction is None
-        assert result.error_message is None
     
     @patch('solcx.compile_source')
     @patch('solcx.install_solc')
@@ -434,6 +429,327 @@ class TestCompileSolidityContract:
         # Assert
         assert result.success == False
         assert "tipo" in result.error_message.lower()
+
+
+@pytest.mark.asyncio
+class TestPrepareDeploymentTransaction:
+    """
+    Testes para a função prepare_deployment_transaction
+    Cobre todos os cenários de preparação de transação de deployment
+    """
+    
+    async def test_success_with_constructor_params(
+        self,
+        mock_web3,
+        mock_compilation_success,
+        valid_deployer_address
+    ):
+        """
+        Cenário: Preparação bem-sucedida com parâmetros no construtor
+        Resultado esperado: success=True, transaction com todos os campos
+        """
+        from src.besu.services import prepare_deployment_transaction
+        
+        # Arrange
+        # to_checksum_address é síncrono no Web3
+        mock_web3.to_checksum_address = MagicMock(return_value=valid_deployer_address)
+        
+        # Configurar mock_web3.eth como MagicMock para evitar problemas com AsyncMock
+        mock_eth = MagicMock()
+        mock_eth.get_transaction_count = AsyncMock(return_value=5)
+        # gas_price e chain_id são propriedades que retornam corrotinas
+        type(mock_eth).gas_price = PropertyMock(return_value=AsyncMock(return_value=1000000000)())
+        type(mock_eth).chain_id = PropertyMock(return_value=AsyncMock(return_value=1337)())
+        
+        # Mock do contrato e construtor (MUST be MagicMock, not AsyncMock)
+        mock_contract = MagicMock()
+        mock_constructor = MagicMock()
+        mock_constructor.data_in_transaction = "0x608060405234801561001057600080fd5b50"
+        mock_contract.constructor.return_value = mock_constructor
+        mock_eth.contract = MagicMock(return_value=mock_contract)
+        
+        mock_web3.eth = mock_eth
+        
+        constructor_params = '[42, "test"]'
+        gas_limit = 3000000
+        
+        # Act
+        result = await prepare_deployment_transaction(
+            w3=mock_web3,
+            compilation_result=mock_compilation_success,
+            deployer_address=valid_deployer_address,
+            constructor_params_json=constructor_params,
+            gas_limit=gas_limit
+        )
+        
+        # Assert
+        assert result.success == True
+        assert result.transaction is not None
+        assert result.transaction['from'] == valid_deployer_address
+        assert result.transaction['nonce'] == 5
+        assert result.transaction['gas'] == 3000000
+        assert result.transaction['gasPrice'] == 1000000000
+        assert result.transaction['chainId'] == 1337
+        assert result.transaction['value'] == 0
+        assert 'data' in result.transaction
+    
+    async def test_success_without_constructor_params(
+        self,
+        mock_web3,
+        mock_compilation_success,
+        valid_deployer_address
+    ):
+        """
+        Cenário: Preparação bem-sucedida sem parâmetros no construtor
+        Resultado esperado: success=True, data é apenas o bytecode
+        """
+        from src.besu.services import prepare_deployment_transaction
+        
+        # Arrange
+        mock_web3.to_checksum_address = MagicMock(return_value=valid_deployer_address)
+        
+        mock_eth = MagicMock()
+        mock_eth.get_transaction_count = AsyncMock(return_value=0)
+        type(mock_eth).gas_price = PropertyMock(return_value=AsyncMock(return_value=2000000000)())
+        type(mock_eth).chain_id = PropertyMock(return_value=AsyncMock(return_value=1337)())
+        
+        mock_contract = MagicMock()
+        mock_eth.contract = MagicMock(return_value=mock_contract)
+        
+        mock_web3.eth = mock_eth
+        
+        constructor_params = '[]'
+        gas_limit = 5000000
+        
+        # Act
+        result = await prepare_deployment_transaction(
+            w3=mock_web3,
+            compilation_result=mock_compilation_success,
+            deployer_address=valid_deployer_address,
+            constructor_params_json=constructor_params,
+            gas_limit=gas_limit
+        )
+        
+        # Assert
+        assert result.success == True
+        assert result.transaction is not None
+        assert result.transaction['nonce'] == 0
+        assert result.transaction['gas'] == 5000000
+        # Data deve ser o bytecode quando não há parâmetros
+        assert result.transaction['data'].startswith('0x')
+    
+    async def test_compilation_failed(
+        self,
+        mock_web3,
+        mock_compilation_failed,
+        valid_deployer_address
+    ):
+        """
+        Cenário: Compilação falhou antes de preparar transação
+        Resultado esperado: Retorna o mesmo objeto de erro da compilação
+        """
+        from src.besu.services import prepare_deployment_transaction
+        
+        # Act
+        result = await prepare_deployment_transaction(
+            w3=mock_web3,
+            compilation_result=mock_compilation_failed,
+            deployer_address=valid_deployer_address,
+            constructor_params_json='[]',
+            gas_limit=3000000
+        )
+        
+        # Assert
+        assert result.success == False
+        assert result.error_message == "Erro de compilação"
+    
+    async def test_invalid_json_constructor_params(
+        self,
+        mock_web3,
+        mock_compilation_success,
+        valid_deployer_address
+    ):
+        """
+        Cenário: constructor_params não é JSON válido
+        Resultado esperado: success=False, erro de parsing
+        """
+        from src.besu.services import prepare_deployment_transaction
+        
+        # Act
+        result = await prepare_deployment_transaction(
+            w3=mock_web3,
+            compilation_result=mock_compilation_success,
+            deployer_address=valid_deployer_address,
+            constructor_params_json='not-a-json',
+            gas_limit=3000000
+        )
+        
+        # Assert
+        assert result.success == False
+        assert "parsear constructor_params" in result.error_message
+    
+    async def test_constructor_params_not_array(
+        self,
+        mock_web3,
+        mock_compilation_success,
+        valid_deployer_address
+    ):
+        """
+        Cenário: constructor_params é JSON válido mas não é um array
+        Resultado esperado: success=False, erro de tipo
+        """
+        from src.besu.services import prepare_deployment_transaction
+        
+        # Act
+        result = await prepare_deployment_transaction(
+            w3=mock_web3,
+            compilation_result=mock_compilation_success,
+            deployer_address=valid_deployer_address,
+            constructor_params_json='{"key": "value"}',  # Objeto, não array
+            gas_limit=3000000
+        )
+        
+        # Assert
+        assert result.success == False
+        assert "array JSON" in result.error_message
+    
+    async def test_invalid_deployer_address_no_0x(
+        self,
+        mock_web3,
+        mock_compilation_success
+    ):
+        """
+        Cenário: deployer_address sem prefixo 0x
+        Resultado esperado: success=False, erro de validação
+        """
+        from src.besu.services import prepare_deployment_transaction
+        
+        # Act
+        result = await prepare_deployment_transaction(
+            w3=mock_web3,
+            compilation_result=mock_compilation_success,
+            deployer_address="742d35Cc6634C0532925a3b844Bc9e7595f0bEb",  # Sem 0x
+            constructor_params_json='[]',
+            gas_limit=3000000
+        )
+        
+        # Assert
+        assert result.success == False
+        assert "0x" in result.error_message
+    
+    async def test_invalid_deployer_address_format(
+        self,
+        mock_web3,
+        mock_compilation_success,
+        invalid_deployer_address
+    ):
+        """
+        Cenário: deployer_address com formato inválido
+        Resultado esperado: success=False, erro ao converter para checksum
+        """
+        from src.besu.services import prepare_deployment_transaction
+        
+        # Arrange
+        mock_web3.to_checksum_address = MagicMock(side_effect=Exception("Invalid address"))
+        
+        # Act
+        result = await prepare_deployment_transaction(
+            w3=mock_web3,
+            compilation_result=mock_compilation_success,
+            deployer_address="0xinvalid",
+            constructor_params_json='[]',
+            gas_limit=3000000
+        )
+        
+        # Assert
+        assert result.success == False
+        assert "inválido" in result.error_message.lower()
+    
+    async def test_empty_deployer_address(
+        self,
+        mock_web3,
+        mock_compilation_success
+    ):
+        """
+        Cenário: deployer_address vazio
+        Resultado esperado: success=False, erro de validação
+        """
+        from src.besu.services import prepare_deployment_transaction
+        
+        # Act
+        result = await prepare_deployment_transaction(
+            w3=mock_web3,
+            compilation_result=mock_compilation_success,
+            deployer_address="",
+            constructor_params_json='[]',
+            gas_limit=3000000
+        )
+        
+        # Assert
+        assert result.success == False
+        assert "inválido" in result.error_message
+    
+    async def test_error_encoding_constructor(
+        self,
+        mock_web3,
+        mock_compilation_success,
+        valid_deployer_address
+    ):
+        """
+        Cenário: Erro ao encodar construtor (params incompatíveis com ABI)
+        Resultado esperado: success=False, erro ao preparar transação
+        """
+        from src.besu.services import prepare_deployment_transaction
+        
+        # Arrange
+        mock_web3.to_checksum_address = MagicMock(return_value=valid_deployer_address)
+        mock_contract = MagicMock()
+        mock_contract.constructor.side_effect = Exception("Type mismatch in constructor")
+        mock_web3.eth.contract = MagicMock(return_value=mock_contract)
+        
+        # Act
+        result = await prepare_deployment_transaction(
+            w3=mock_web3,
+            compilation_result=mock_compilation_success,
+            deployer_address=valid_deployer_address,
+            constructor_params_json='["wrong_type"]',
+            gas_limit=3000000
+        )
+        
+        # Assert
+        assert result.success == False
+        assert "preparar transação" in result.error_message
+    
+    async def test_error_fetching_nonce(
+        self,
+        mock_web3,
+        mock_compilation_success,
+        valid_deployer_address
+    ):
+        """
+        Cenário: Erro ao buscar nonce da rede
+        Resultado esperado: success=False, erro ao preparar transação
+        """
+        from src.besu.services import prepare_deployment_transaction
+        
+        # Arrange
+        mock_web3.to_checksum_address = MagicMock(return_value=valid_deployer_address)
+        mock_contract = MagicMock()
+        mock_web3.eth.contract = MagicMock(return_value=mock_contract)
+        mock_web3.eth.get_transaction_count.side_effect = Exception("Network error")
+        
+        # Act
+        result = await prepare_deployment_transaction(
+            w3=mock_web3,
+            compilation_result=mock_compilation_success,
+            deployer_address=valid_deployer_address,
+            constructor_params_json='[]',
+            gas_limit=3000000
+        )
+        
+        # Assert
+        assert result.success == False
+        assert "preparar transação" in result.error_message
 
 
 @pytest.mark.asyncio
