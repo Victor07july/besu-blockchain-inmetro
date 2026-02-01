@@ -68,8 +68,6 @@ async def deploy_signed_contract(
     ):
 
     is_authorized = await check_authorization(authorization)
-    if not is_authorized:
-        raise HTTPException(status_code=401, detail="Token de autorização inválido")
     
     # Verifica se o usuário é admin
     is_admin = await check_is_admin(authorization, user_repo)

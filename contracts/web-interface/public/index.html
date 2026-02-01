@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CarbonCredit E2 - NFT Marketplace</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <nav class="navbar">
+        <div class="container">
+            <h1>🌱 CarbonCredit E2</h1>
+            <div class="nav-links">
+                <a href="#marketplace" onclick="showSection('marketplace')">Marketplace</a>
+                <a href="#upload-csv" onclick="showSection('upload-csv')">📤 Upload CSV</a>
+                <a href="#my-tokens" onclick="showSection('my-tokens')">Meus Tokens</a>
+                <a href="#help" onclick="showSection('help')">❓ Ajuda</a>
+                <button id="connect-wallet" class="btn btn-secondary" onclick="connectMetaMask()">🦊 Conectar
+                    MetaMask</button>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container">
+        <!-- Informações do Contrato -->
+        <div class="contract-info card" id="contract-info">
+            <h2>📊 Informações do Contrato</h2>
+            <div class="info-grid">
+                <div class="info-item">
+                    <span class="label">Endereço:</span>
+                    <span class="value" id="contract-address">Carregando...</span>
+                </div>
+                <div class="info-item">
+                    <span class="label">Token:</span>
+                    <span class="value" id="contract-name">Carregando...</span>
+                </div>
+                <div class="info-item">
+                    <span class="label">Total de NFTs:</span>
+                    <span class="value" id="total-supply">Carregando...</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Seção Marketplace -->
+        <div id="marketplace-section" class="section">
+            <h2>🏪 Marketplace</h2>
+            <div class="filters">
+                <button onclick="loadMarketplace()" class="btn btn-secondary">🔄 Atualizar</button>
+            </div>
+            <div id="tokens-grid" class="tokens-grid">
+                <p class="loading">Carregando tokens...</p>
+            </div>
+        </div>
+
+        <!-- Seção Upload CSV -->
+        <div id="upload-csv-section" class="section" style="display: none;">
+            <h2>📤 Upload CSV - Criar NFTs em Lote</h2>
+            <div class="card">
+                <div class="info-box">
+                    <h3>ℹ️ Como funciona:</h3>
+                    <ul>
+                        <li>📄 Envie um arquivo CSV com dados de viagens</li>
+                        <li>🔢 Escolha qual linha processar ou deixe em branco para todas</li>
+                        <li>🧮 O servidor calcula automaticamente o valor E2</li>
+                        <li>🎨 Cria o NFT e lista automaticamente pelo valor de E2</li>
+                        <li>🏪 NFT aparece imediatamente no Marketplace!</li>
+                    </ul>
+                    <p><strong>Formato esperado:</strong> VIN, model, brand, ethanol (%), highway (distance), city
+                        (distance), behavior_cautious (%), behavior_normal (%), behavior_aggressive (%)</p>
+                </div>
+
+                <form id="upload-form">
+                    <div class="form-group">
+                        <label>Arquivo CSV</label>
+                        <input type="file" id="csv-file" accept=".csv" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Linha do CSV (opcional - deixe vazio para processar todas)</label>
+                        <input type="number" id="row-index" placeholder="0 para primeira linha, 1 para segunda..."
+                            min="0">
+                        <small>💡 Índice começa em 0. Exemplo: 0 = primeira linha de dados</small>
+                    </div>
+                    <div class="form-group">
+                        <label>Carteira Conectada</label>
+                        <div id="wallet-status" class="wallet-status">
+                            <span id="wallet-address">❌ Nenhuma carteira conectada - use o botão na barra
+                                superior</span>
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-primary" id="submit-csv-btn" disabled>📤 Processar CSV e Criar
+                        NFTs</button>
+                </form>
+
+                <div id="upload-progress" class="upload-progress" style="display: none;">
+                    <h3>⏳ Processando...</h3>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progress-fill"></div>
+                    </div>
+                    <p id="progress-text">Iniciando processamento...</p>
+                </div>
+
+                <div id="upload-results" class="upload-results" style="display: none;"></div>
+            </div>
+        </div>
+
+        <!-- Seção Meus Tokens -->
+        <div id="my-tokens-section" class="section" style="display: none;">
+            <h2>🎨 Meus Tokens</h2>
+            <div class="card">
+                <p class="info-message">
+                    🦊 Conecte sua carteira MetaMask para ver seus NFTs automaticamente!
+                </p>
+                <button onclick="loadMyTokens()" class="btn btn-primary">🔄 Atualizar Meus Tokens</button>
+            </div>
+            <div id="my-tokens-grid" class="tokens-grid">
+                <p class="info-message">Conecte o MetaMask e clique em "Atualizar" para ver seus tokens</p>
+            </div>
+        </div>
+
+        <!-- Seção Ajuda -->
+        <div id="help-section" class="section" style="display: none;">
+            <h2>❓ Ajuda e Problemas Comuns</h2>
+
+            <div class="card">
+                <h3>🔧 Problemas de Conexão</h3>
+                <div class="help-item">
+                    <strong>❌ Erro: "Contrato não encontrado" ou "Nenhum código no endereço"</strong>
+                    <ul>
+                        <li>Verifique se o endereço do contrato no arquivo <code>.env</code> está correto</li>
+                        <li>Certifique-se de que o contrato foi deployado na rede</li>
+                        <li>Execute: <code>cd dapps/monetiza_co2/scripts/E2 && python3 2_deploy.py</code></li>
+                        <li>Copie o novo endereço para <code>dapps/web-interface/.env</code></li>
+                        <li>Reinicie o servidor Node.js</li>
+                    </ul>
+                </div>
+
+                <div class="help-item">
+                    <strong>❌ Erro: "MetaMask não conecta" ou "Rede incorreta"</strong>
+                    <ul>
+                        <li>Verifique se o MetaMask está instalado: <a href="https://metamask.io"
+                                target="_blank">metamask.io</a></li>
+                        <li>Certifique-se de estar na rede <strong>Besu Local (ChainID 1337)</strong></li>
+                        <li>Configure manualmente: Configurações → Redes → Adicionar Rede</li>
+                        <li>RPC URL: <code>http://localhost:8545</code></li>
+                        <li>ChainID: <code>1337</code></li>
+                    </ul>
+                </div>
+
+                <div class="help-item">
+                    <strong>⚠️ Erro após reiniciar a rede Besu</strong>
+                    <ul>
+                        <li>O MetaMask cacheia transações antigas</li>
+                        <li>Solução: MetaMask → Configurações → Avançado → "Limpar dados de atividade e nonce"</li>
+                        <li>Ou clique em "Reset Account" nas configurações da conta</li>
+                        <li>Recarregue a página do navegador</li>
+                    </ul>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3>📤 Problemas ao Criar NFTs</h3>
+                <div class="help-item">
+                    <strong>❌ Erro: "Processamento falhou" ou valores incorretos</strong>
+                    <ul>
+                        <li>Verifique o formato do CSV: deve ter as colunas corretas</li>
+                        <li>Colunas obrigatórias: VIN, ethanol (%), highway (distance), city (distance),
+                            behavior_cautious (%), behavior_normal (%), behavior_aggressive (%)</li>
+                        <li>Comportamentos devem somar 100%</li>
+                        <li>Use ponto (.) como separador decimal, não vírgula</li>
+                    </ul>
+                </div>
+
+                <div class="help-item">
+                    <strong>❌ Erro: "Gas limit exceeded" ou "Out of gas"</strong>
+                    <ul>
+                        <li>Processe uma linha por vez usando o campo "Linha do CSV"</li>
+                        <li>Não tente processar muitas linhas de uma vez</li>
+                        <li>Aumente o gas limit no contrato se necessário</li>
+                    </ul>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3>🛠️ Comandos Úteis</h3>
+                <div class="help-item">
+                    <strong>Recompilar e redesploy do contrato:</strong>
+                    <pre><code>cd /home/inmetro/besu-quickstarter-modified/dapps/monetiza_co2/scripts/E2
+python3 1_compile.py
+python3 2_deploy.py</code></pre>
+                </div>
+
+                <div class="help-item">
+                    <strong>Reiniciar servidor Node.js:</strong>
+                    <pre><code>cd /home/inmetro/besu-quickstarter-modified/dapps/web-interface
+node server.js</code></pre>
+                </div>
+
+                <div class="help-item">
+                    <strong>Verificar logs do servidor:</strong>
+                    <p>Os logs aparecem no terminal onde você executou <code>node server.js</code></p>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3>💡 Dicas</h3>
+                <ul>
+                    <li>✅ Sempre conecte o MetaMask antes de fazer upload de CSV</li>
+                    <li>✅ O endereço da conta conectada receberá os NFTs automaticamente</li>
+                    <li>✅ NFTs são listados automaticamente com preço = valor E2 calculado</li>
+                    <li>✅ Use "Linha do CSV" para testar com uma linha específica antes de processar tudo</li>
+                    <li>✅ Valores E2 podem ter pequenas diferenças devido a arredondamento em inteiros (normal)</li>
+                </ul>
+            </div>
+
+            <div class="card">
+                <h3>🔑 Contas de Teste Besu</h3>
+                <p>Use estas chaves privadas para importar contas no MetaMask e testar o marketplace:</p>
+
+                <div class="help-item">
+                    <strong>Member 1:</strong>
+                    <p><code>Endereço: 0x13a52aab892e1322e8b52506276363d4754c122e</code></p>
+                    <p><code>Chave: 0x8bbbb1b345af56b560a5b20bd4b0ed1cd8cc9958a16262bc75118453cb546df7</code></p>
+                </div>
+
+                <div class="help-item">
+                    <strong>Member 2:</strong>
+                    <p><code>Endereço: 0xe090a28b8a9d0a69ec259cb745036d5d1030e3ea</code></p>
+                    <p><code>Chave: 0x4762e04d10832808a0aebdaa79c12de54afbe006bfffd228b3abcc494fe986f9</code></p>
+                </div>
+
+                <div class="help-item">
+                    <strong>Member 3:</strong>
+                    <p><code>Endereço: 0x401bdfcd9221cd790e7cd66eece303ed4d4b53b1</code></p>
+                    <p><code>Chave: 0x61dced5af778942996880120b303fc11ee28cc8e5036d2fdff619b5675ded3f0</code></p>
+                </div>
+
+                <p style="margin-top: 15px;"><strong>Como importar no MetaMask:</strong></p>
+                <ol>
+                    <li>Clique no ícone da conta (topo direito do MetaMask)</li>
+                    <li>Selecione "Importar conta"</li>
+                    <li>Cole uma das chaves privadas acima</li>
+                    <li>Confirme a importação</li>
+                </ol>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal de Detalhes do Token -->
+    <div id="token-modal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeModal()">&times;</span>
+            <h2>Token #<span id="modal-token-id"></span></h2>
+            <div id="modal-body"></div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/ethers@5.7.2/dist/ethers.umd.min.js"></script>
+    <script src="app.js"></script>
+</body>
+
+</html>

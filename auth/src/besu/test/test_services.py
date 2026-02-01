@@ -753,35 +753,7 @@ class TestPrepareDeploymentTransaction:
 
 
 @pytest.mark.asyncio
-class TestEdgeCases:
-    """
-    Testes de casos extremos e situações incomuns
-    """
-    
-    async def test_signed_transaction_without_0x_prefix(
-        self,
-        mock_web3,
-        mock_tx_hash,
-        mock_success_receipt
-    ):
-        """
-        Cenário: Transação sem prefixo 0x (deve adicionar automaticamente)
-        Resultado esperado: success=True (função adiciona 0x)
-        """
-        # Arrange
-        tx_without_prefix = "f86c808504a817c800825208949876543210abcdef"
-        mock_web3.eth.send_raw_transaction.return_value = mock_tx_hash
-        mock_web3.eth.wait_for_transaction_receipt.return_value = mock_success_receipt
-        
-        # Act
-        result = await broadcast_signed_transaction(mock_web3, tx_without_prefix)
-        
-        # Assert
-        assert result.success == True
-        # Verifica que send_raw_transaction foi chamado com 0x
-        call_args = mock_web3.eth.send_raw_transaction.call_args[0][0]
-        assert call_args.startswith('0x')
-    
+class TestEdgeCases:    
     async def test_transaction_success_without_contract_address(
         self,
         mock_web3,

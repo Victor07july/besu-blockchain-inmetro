@@ -22,28 +22,6 @@ async def prepare_deployment_transaction(
     constructor_params_json: str,
     gas_limit: int
 ) -> ContractCompilationResponse:
-    """
-    Prepara uma transação de deployment completa a partir de um contrato compilado.
-    
-    Esta função encapsula toda a lógica de:
-    - Parsing e validação dos parâmetros do construtor
-    - Validação e conversão do endereço do deployer
-    - Encodar o construtor do contrato
-    - Buscar informações da rede (nonce, gas_price, chain_id)
-    - Montar o objeto de transação completo
-    
-    Args:
-        w3: Cliente Web3 conectado ao Besu
-        compilation_result: Resultado da compilação do contrato (com abi e bytecode)
-        deployer_address: Endereço que fará o deploy
-        constructor_params_json: String JSON com parâmetros do construtor. Ex: "[42]" ou "[]"
-        gas_limit: Limite de gas para a transação
-        
-    Returns:
-        ContractCompilationResponse com success=True e transaction preenchida, ou
-        ContractCompilationResponse com success=False e error_message
-    """
-    import json
     
     # 1. Validar se a compilação foi bem-sucedida
     if not compilation_result.success:
@@ -198,9 +176,6 @@ async def compile_solidity_contract(contract_file: UploadFile) -> ContractCompil
             # Configurar remappings para bibliotecas Solidity (formato correto para py-solc-x)
             import_remappings = [
                 '@openzeppelin/contracts=/usr/local/lib/node_modules/@openzeppelin/contracts',
-                # Adicione mais bibliotecas aqui conforme necessário:
-                # '@chainlink/contracts=/usr/local/lib/node_modules/@chainlink/contracts',
-                # '@uniswap/v3-core=/usr/local/lib/node_modules/@uniswap/v3-core',
             ]
             
             # Tentar compilar com remappings
@@ -274,21 +249,7 @@ async def broadcast_signed_transaction(
     w3: AsyncWeb3,
     signed_transaction: str
 ) -> SignedTransactionResponse:
-    """
-    Faz broadcast de uma transação já assinada localmente pelo cliente.
-    
-    Esta é a forma SEGURA de fazer deploy, pois:
-    - A chave privada NUNCA trafega na rede
-    - A assinatura é feita localmente pelo cliente
-    - O servidor apenas faz broadcast da transação
-    
-    Args:
-        w3: Cliente Web3 conectado ao Besu
-        signed_transaction: Raw transaction assinada em hexadecimal
-        
-    Returns:
-        SignedTransactionResponse com endereço do contrato e hash da transação
-    """
+
     try:
         # Verificar conexão
         if not await w3.is_connected():
@@ -335,12 +296,7 @@ async def broadcast_signed_transaction(
                     success=False,
                     error_message=f"Erro de nonce: {error_msg}. Verifique se o nonce está correto."
                 )
-            # não necessário 
-            # elif "balance" in error_msg.lower() or "funds" in error_msg.lower():
-            #     return SignedTransactionResponse(
-            #         success=False,
-            #         error_message=f"Saldo insuficiente: {error_msg}"
-            #     )
+
             else:
                 return SignedTransactionResponse(
                     success=False,
