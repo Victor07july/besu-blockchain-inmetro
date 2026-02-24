@@ -219,8 +219,24 @@ def process_obdlink_telemetry(input_csv: str, output_csv: str,
     with open(input_csv, 'r') as f:
         first_line = f.readline()
         if 'StartTime' in first_line:
-            time_str = first_line.split('=')[1].strip().split('.')[0]
-            start_timestamp = datetime.strptime(time_str, "%m/%d/%Y %I:%M:%S %p")
+            # Formato: # StartTime = 01/19/2024 01:25:31.1282 PM
+            time_str = first_line.split('=')[1].strip()
+            # Remover milissegundos mas manter AM/PM
+            # Split: ['01/19/2024', '01:25:31.1282', 'PM']
+            parts = time_str.split()
+            if len(parts) == 3:
+                date_part = parts[0]
+                time_part = parts[1].split('.')[0]  # Remove milissegundos
+                ampm_part = parts[2]
+                time_str = f"{date_part} {time_part} {ampm_part}"
+                start_timestamp = datetime.strptime(time_str, "%m/%d/%Y %I:%M:%S %p")
+            else:
+                # Formato alternativo sem AM/PM
+                time_str = time_str.split('.')[0]
+                try:
+                    start_timestamp = datetime.strptime(time_str, "%m/%d/%Y %H:%M:%S")
+                except:
+                    start_timestamp = datetime.now()
         else:
             start_timestamp = datetime.now()
     

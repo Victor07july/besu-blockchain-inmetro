@@ -7,6 +7,8 @@ Autor: Victor
 Data: 2026-02-23
 """
 
+# 0xfe3b557e8fb62b89f4916b721be55ceb828dbd73
+
 import json
 import sys
 from web3 import Web3
@@ -111,23 +113,19 @@ def load_compiled_contract(abi_path: str = None, bytecode_path: str = None) -> d
     sys.exit(1)
 
 
-def deploy_contract(rpc_url: str, private_key: str, contract_path: str = None,
-                   abi_path: str = None, bytecode_path: str = None,
-                   gas_limit: int = 5000000) -> str:
+def deploy_contract():
     """
     Faz deploy do contrato E1RegistryTelemetry
-    
-    Args:
-        rpc_url: URL do nó Besu
-        private_key: Chave privada da conta deployer
-        contract_path: Caminho do .sol (para compilar)
-        abi_path: Caminho do ABI (se já compilado)
-        bytecode_path: Caminho do bytecode (se já compilado)
-        gas_limit: Limite de gas para deploy
-        
-    Returns:
-        Endereço do contrato deployado
     """
+    print("🚀 Iniciando deploy do contrato E1RegistryTelemetry...\n")
+    print("📍 Pipeline Simplificado: Telemetria OBDLink\n")
+    
+    # Configurações fixas
+    rpc_url = "http://localhost:8545"
+    private_key = "0x8f2a55949038a9610f50fb23b5883af3b4ecb3c3bb792cbcefbd1542c692be63"
+    contract_path = "../contracts/E1RegistryTelemetry.sol"
+    gas_limit = 5000000
+    
     print("="*70)
     print("🚀 DEPLOY DO CONTRATO E1RegistryTelemetry")
     print("="*70)
@@ -136,13 +134,21 @@ def deploy_contract(rpc_url: str, private_key: str, contract_path: str = None,
     print(f"\n🌐 Conectando ao Besu: {rpc_url}")
     w3 = Web3(Web3.HTTPProvider(rpc_url))
     
-    if not w3.is_connected():
-        print(f"❌ Não foi possível conectar ao nó: {rpc_url}")
-        sys.exit(1)
+    # Adicionar middleware POA para Besu/QBFT
+    from web3.middleware import ExtraDataToPOAMiddleware
+    w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
     
-    print(f"✓ Conectado!")
-    print(f"  Chain ID: {w3.eth.chain_id}")
-    print(f"  Block number: {w3.eth.block_number}")
+    # Verificar conexão
+    try:
+        chain_id = w3.eth.chain_id
+        block_number = w3.eth.block_number
+        print(f"✓ Conectado!")
+        print(f"  Chain ID: {chain_id}")
+        print(f"  Block number: {block_number}")
+    except Exception as e:
+        print(f"❌ Não foi possível conectar ao nó: {rpc_url}")
+        print(f"  Erro: {e}")
+        sys.exit(1)
     
     # Configurar conta
     account = Account.from_key(private_key)
@@ -158,10 +164,10 @@ def deploy_contract(rpc_url: str, private_key: str, contract_path: str = None,
         sys.exit(1)
     
     # Compilar ou carregar contrato
-    if contract_path and SOLCX_AVAILABLE:
+    if contract_path and SOLCX_AVAILABLE and Path(contract_path).exists():
         contract_data = compile_contract(contract_path)
     else:
-        contract_data = load_compiled_contract(abi_path, bytecode_path)
+        contract_data = load_compiled_contract()
     
     # Criar objeto do contrato
     Contract = w3.eth.contract(
@@ -200,7 +206,7 @@ def deploy_contract(rpc_url: str, private_key: str, contract_path: str = None,
     
     # Enviar transação
     print(f"📡 Enviando transação...")
-    tx_hash = w3.eth.send_raw_transaction(signed_txn.rawTransaction)
+    tx_hash = w3.eth.send_raw_transaction(signed_txn.raw_transaction)
     
     print(f"✓ Transação enviada!")
     print(f"  TX hash: {tx_hash.hex()}")
@@ -226,6 +232,18 @@ def deploy_contract(rpc_url: str, private_key: str, contract_path: str = None,
             
             # Verificar deploy
             verify_deployment(w3, contract_address, contract_data['abi'])
+            
+            # Instruções finais
+            print("\n" + "="*70)
+            print("📋 PRÓXIMOS PASSOS")
+            print("="*70)
+            print("\n1. Processar dados OBD:")
+            print(f"   cd scripts")
+            print(f"   python3 process_obdlink_telemetry.py ../../data/OBDLink.csv trips.csv VEHICLE_001 0.5")
+            print("\n2. Enviar viagens ao blockchain:")
+            print(f"   python3 send_telemetry_to_blockchain.py trips.csv {contract_address}")
+            print("\n3. Ou use o endereço salvo em deployment_info.json")
+            print("="*70 + "\n")
             
             return contract_address
             
@@ -294,63 +312,13 @@ def main():
     print("🏗️  E1RegistryTelemetry - Script de Deploy")
     print("="*70 + "\n")
     
-    # Configuração padrão
-    default_rpc = "http://localhost:8545"
-    contract_sol = "../contracts/E1RegistryTelemetry.sol"
-    
-    if len(sys.argv) < 2:
-        print("Uso: python3 deploy_telemetry.py <private_key> [rpc_url] [contract_path]")
-        print("\nExemplo:")
-        print(f"  python3 deploy_telemetry.py 0xabc123... {default_rpc}")
-        print(f"  python3 deploy_telemetry.py 0xabc123... http://172.16.239.11:8545")
-        print("\nOu use variáveis de ambiente:")
-        print("  export PRIVATE_KEY=0xabc123...")
-        print("  export RPC_URL=http://localhost:8545")
-        print("  python3 deploy_telemetry.py")
-        sys.exit(1)
-    
-    # Parâmetros
-    if len(sys.argv) >= 2:
-        private_key = sys.argv[1]
-    else:
-        import os
-        private_key = os.getenv('PRIVATE_KEY')
-        if not private_key:
-            print("❌ Private key não fornecida")
-            sys.exit(1)
-    
-    rpc_url = sys.argv[2] if len(sys.argv) >= 3 else default_rpc
-    contract_path = sys.argv[3] if len(sys.argv) >= 4 else contract_sol
-    
-    # Verificar se arquivo existe
-    if Path(contract_path).exists():
-        print(f"📄 Contrato: {contract_path}")
-    elif Path("../contracts/artifacts/contracts/E1RegistryTelemetry.sol/E1RegistryTelemetry.json").exists():
-        print(f"📦 Usando contrato compilado pelo Hardhat")
-        contract_path = None
-    else:
-        print(f"❌ Contrato não encontrado: {contract_path}")
-        print(f"   Compile primeiro com: npx hardhat compile")
-        sys.exit(1)
-    
-    # Deploy
-    contract_address = deploy_contract(
-        rpc_url=rpc_url,
-        private_key=private_key,
-        contract_path=contract_path if SOLCX_AVAILABLE else None
-    )
-    
-    # Instruções finais
-    print("\n" + "="*70)
-    print("📋 PRÓXIMOS PASSOS")
-    print("="*70)
-    print("\n1. Processar dados OBD:")
-    print(f"   cd scripts")
-    print(f"   python3 process_obdlink_telemetry.py ../../data/OBDLink.csv trips.csv VEHICLE_001 0.5")
-    print("\n2. Enviar viagens ao blockchain:")
-    print(f"   python3 send_telemetry_to_blockchain.py trips.csv {contract_address} <private_key>")
-    print("\n3. Ou use o endereço salvo em deployment_info.json")
-    print("="*70 + "\n")
+    try:
+        deployment = deploy_contract()
+    except Exception as e:
+        print(f"\n❌ Erro: {e}")
+        import traceback
+        traceback.print_exc()
+        exit(1)
 
 
 if __name__ == "__main__":

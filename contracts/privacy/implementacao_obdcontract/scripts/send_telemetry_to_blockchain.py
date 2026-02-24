@@ -36,12 +36,18 @@ class E1TelemetryContractInterface:
         """
         self.w3 = Web3(Web3.HTTPProvider(rpc_url))
         
-        if not self.w3.is_connected():
-            raise ConnectionError(f"Não foi possível conectar ao nó: {rpc_url}")
+        # Adicionar middleware POA para Besu/QBFT
+        from web3.middleware import ExtraDataToPOAMiddleware
+        self.w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
         
-        print(f"✓ Conectado ao Besu: {rpc_url}")
-        print(f"  Chain ID: {self.w3.eth.chain_id}")
-        print(f"  Block number: {self.w3.eth.block_number}")
+        try:
+            chain_id = self.w3.eth.chain_id
+            block_number = self.w3.eth.block_number
+            print(f"✓ Conectado ao Besu: {rpc_url}")
+            print(f"  Chain ID: {chain_id}")
+            print(f"  Block number: {block_number}")
+        except Exception as e:
+            raise ConnectionError(f"Não foi possível conectar ao nó: {rpc_url} - {e}")
         
         # Configurar conta
         self.account = Account.from_key(private_key)
@@ -115,9 +121,9 @@ class E1TelemetryContractInterface:
         # Timestamp
         timestamp = int(row['timestamp'])
         
-        # Gerar pseudônimo
-        pseudonimo = self.w3.keccak(text=row['vin']).hex()
-        pseudonimo_address = self.w3.to_checksum_address(pseudonimo[:42])
+        # Gerar pseudônimo (20 bytes = 40 hex chars de um endereço)
+        pseudonimo_hash = self.w3.keccak(text=row['vin'])
+        pseudonimo_address = self.w3.to_checksum_address(pseudonimo_hash[:20])  # Primeiros 20 bytes
         
         params = {
             'vin': row['vin'],
@@ -172,7 +178,7 @@ class E1TelemetryContractInterface:
         )
         
         # Enviar
-        tx_hash = self.w3.eth.send_raw_transaction(signed_txn.rawTransaction)
+        tx_hash = self.w3.eth.send_raw_transaction(signed_txn.raw_transaction)
         
         print(f"  📤 TX enviada: {tx_hash.hex()}")
         
@@ -199,21 +205,19 @@ class E1TelemetryContractInterface:
             return None
 
 
-def send_trips_to_blockchain(csv_file: str, 
-                             rpc_url: str = "http://localhost:8545",
-                             contract_address: str = None,
-                             private_key: str = None,
-                             carbon_price: int = 50_000_000):
+def send_trips_to_blockchain(csv_file: str):
     """
     Envia viagens do CSV ao contrato E1RegistryTelemetry
+    Usa configurações hardcoded (rpc_url, private_key, contract_address)
     
     Args:
         csv_file: Caminho do CSV processado
-        rpc_url: URL do nó Besu
-        contract_address: Endereço do contrato
-        private_key: Chave privada da conta oracle
-        carbon_price: Preço do carbono (R$/ton × 1e6)
     """
+    # Configurações fixas
+    rpc_url = "http://localhost:8545"
+    private_key = "0x8f2a55949038a9610f50fb23b5883af3b4ecb3c3bb792cbcefbd1542c692be63"
+    carbon_price = 50_000_000  # R$ 50/ton × 1e6
+    
     print("="*70)
     print("🔗 ENVIO DE TELEMETRIA AO BLOCKCHAIN")
     print("="*70)
@@ -227,23 +231,22 @@ def send_trips_to_blockchain(csv_file: str,
     df = pd.read_csv(csv_file)
     print(f"   Total de viagens: {len(df)}")
     
-    # Carregar ABI do contrato
-    abi_path = "../contracts/E1RegistryTelemetry.json"
+    # Carregar endereço do contrato de deployment_info.json
+    deployment_file = "../deployment_info.json"
     try:
-        with open(abi_path, 'r') as f:
-            contract_abi = json.load(f)['abi']
+        with open(deployment_file, 'r') as f:
+            deployment_info = json.load(f)
+            contract_address = deployment_info['contract_address']
+            contract_abi = deployment_info['abi']
+            print(f"\n✓ Contrato carregado de {deployment_file}")
+            print(f"  Endereço: {contract_address}")
     except FileNotFoundError:
-        print(f"❌ ABI não encontrado: {abi_path}")
-        print("   Compile o contrato primeiro:")
-        print("   cd ../contracts && npx hardhat compile")
+        print(f"❌ Arquivo {deployment_file} não encontrado!")
+        print("   Execute o deploy primeiro: python3 deploy_telemetry.py")
         return
-    
-    # Conectar ao contrato
-    if not contract_address:
-        contract_address = input("Digite o endereço do contrato: ")
-    
-    if not private_key:
-        private_key = input("Digite a chave privada da conta oracle: ")
+    except KeyError as e:
+        print(f"❌ Chave ausente no deployment_info.json: {e}")
+        return
     
     interface = E1TelemetryContractInterface(
         rpc_url, contract_address, contract_abi, private_key
@@ -302,20 +305,22 @@ def send_trips_to_blockchain(csv_file: str,
 def main():
     """Função principal"""
     if len(sys.argv) < 2:
-        print("Uso: python3 send_telemetry_to_blockchain.py <trips_telemetry.csv> [contract_address] [private_key]")
+        print("Uso: python3 send_telemetry_to_blockchain.py <trips_telemetry.csv>")
         print("\nExemplo:")
-        print("  python3 send_telemetry_to_blockchain.py trips_telemetry.csv 0x1234... 0xabc...")
+        print("  python3 send_telemetry_to_blockchain.py trips.csv")
+        print("\nO endereço do contrato será carregado de ../deployment_info.json")
+        print("Execute primeiro: python3 deploy_telemetry.py")
         sys.exit(1)
     
     csv_file = sys.argv[1]
-    contract_address = sys.argv[2] if len(sys.argv) > 2 else None
-    private_key = sys.argv[3] if len(sys.argv) > 3 else None
     
-    send_trips_to_blockchain(
-        csv_file,
-        contract_address=contract_address,
-        private_key=private_key
-    )
+    try:
+        send_trips_to_blockchain(csv_file)
+    except Exception as e:
+        print(f"\n❌ Erro: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
