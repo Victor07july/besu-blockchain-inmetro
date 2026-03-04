@@ -18,6 +18,16 @@ from datetime import datetime, timedelta
 from typing import List, Tuple, Dict
 import math
 
+# Map matching e malha viária
+try:
+    import osmnx as ox
+    import networkx as nx
+    MAP_MATCHING_AVAILABLE = True
+except ImportError:
+    MAP_MATCHING_AVAILABLE = False
+    print("⚠️  osmnx não instalado. Map matching desabilitado.")
+    print("   Instale com: pip install osmnx")
+
 warnings.filterwarnings('ignore')
 
 # ==================== CONFIGURAÇÕES ====================
@@ -30,6 +40,11 @@ CONSUMO_FABRICANTE = 12.0  # km/l (urbano/misto)
 
 # Preço do carbono
 CARBON_PRICE = 50.0  # R$ por tonelada CO2
+
+# Map matching
+ENABLE_MAP_MATCHING = True   # True: Aplicar snap to road | False: Apenas ruído
+SEARCH_RADIUS = 1000         # Raio de busca da malha viária (metros)
+GRAPH_CACHE = {}             # Cache de grafos baixados
 
 # ==================== TRIGGERS/MODOS ====================
 # Modo de processamento de viagens
@@ -82,6 +97,80 @@ def add_laplace_noise(value: float, epsilon: float = 0.5, sensitivity: float = 0
     scale = sensitivity / epsilon
     noise = np.random.laplace(loc=0, scale=scale)
     return value + noise
+
+
+def get_road_network(lat: float, lon: float, radius: int = SEARCH_RADIUS) -> nx.MultiDiGraph:
+    """
+    Baixa malha viária ao redor das coordenadas usando OSMnx
+    
+    Args:
+        lat: Latitude do ponto central
+        lon: Longitude do ponto central
+        radius: Raio de busca em metros
+        
+    Returns:
+        Grafo da rede viária ou None se falhar
+    """
+    if not MAP_MATCHING_AVAILABLE:
+        return None
+    
+    # Cache key baseado em região aproximada
+    cache_key = (round(lat, 3), round(lon, 3))
+    
+    if cache_key in GRAPH_CACHE:
+        return GRAPH_CACHE[cache_key]
+    
+    try:
+        # Baixar grafo de ruas trafegáveis
+        G = ox.graph_from_point(
+            (lat, lon),
+            dist=radius,
+            network_type='drive',
+            simplify=True
+        )
+        
+        GRAPH_CACHE[cache_key] = G
+        return G
+        
+    except Exception as e:
+        print(f"⚠️  Erro ao baixar grafo: {e}")
+        return None
+
+
+def snap_to_nearest_road(G: nx.MultiDiGraph, lat: float, lon: float) -> Tuple[float, float, bool]:
+    """
+    Projeta coordenada para a via trafegável mais próxima (map matching)
+    
+    Args:
+        G: Grafo da rede viária
+        lat: Latitude (com ruído)
+        lon: Longitude (com ruído)
+        
+    Returns:
+        Tupla (lat_snapped, lon_snapped, success)
+    """
+    if G is None or not MAP_MATCHING_AVAILABLE:
+        return lat, lon, False
+    
+    try:
+        # Projetar grafo para facilitar cálculos
+        try:
+            G_proj = ox.project_graph(G)
+            nearest_node = ox.distance.nearest_nodes(G_proj, lon, lat)
+        except:
+            # Fallback: usar grafo não projetado
+            nearest_node = ox.distance.nearest_nodes(G, lon, lat)
+        
+        # Obter coordenadas do nó
+        node_data = G.nodes[nearest_node]
+        lat_snapped = node_data['y']
+        lon_snapped = node_data['x']
+        
+        return lat_snapped, lon_snapped, True
+        
+    except Exception as e:
+        print(f"⚠️  Erro no snap to road: {e}")
+        return lat, lon, False
 
 
 def identify_trips(df: pd.DataFrame, max_gap_seconds: float = 300, 
@@ -195,20 +284,51 @@ def process_trip(df_trip: pd.DataFrame, trip_id: int, start_timestamp: datetime,
     # Monetizar: (kg / 1000) × preço = R$
     valor_e1 = (delta_co2 / 1000.0) * CARBON_PRICE
     
-    # ========== PASSO 5: APLICAR PRIVACIDADE DIFERENCIAL ==========
+    # ========== PASSO 5: APLICAR PRIVACIDADE DIFERENCIAL + MAP MATCHING ==========
     # Coordenadas originais
     start_lat_orig = df_trip.iloc[0][' Latitude (deg)']
     start_lon_orig = df_trip.iloc[0][' Longitude (deg)']
     end_lat_orig = df_trip.iloc[-1][' Latitude (deg)']
     end_lon_orig = df_trip.iloc[-1][' Longitude (deg)']
     
-    # Aplicar DP
-    start_lat_private = add_laplace_noise(start_lat_orig, epsilon)
-    start_lon_private = add_laplace_noise(start_lon_orig, epsilon)
-    end_lat_private = add_laplace_noise(end_lat_orig, epsilon)
-    end_lon_private = add_laplace_noise(end_lon_orig, epsilon)
+    # ETAPA 5.1: Aplicar ruído Laplaciano
+    start_lat_noisy = add_laplace_noise(start_lat_orig, epsilon)
+    start_lon_noisy = add_laplace_noise(start_lon_orig, epsilon)
+    end_lat_noisy = add_laplace_noise(end_lat_orig, epsilon)
+    end_lon_noisy = add_laplace_noise(end_lon_orig, epsilon)
     
-    # Calcular deslocamento causado pelo DP
+    # ETAPA 5.2: Map matching (snap to road)
+    start_snapped = False
+    end_snapped = False
+    
+    if ENABLE_MAP_MATCHING and MAP_MATCHING_AVAILABLE:
+        # Baixar malha viária do início
+        G_start = get_road_network(start_lat_orig, start_lon_orig)
+        if G_start is not None:
+            start_lat_private, start_lon_private, start_snapped = snap_to_nearest_road(
+                G_start, start_lat_noisy, start_lon_noisy
+            )
+        else:
+            start_lat_private = start_lat_noisy
+            start_lon_private = start_lon_noisy
+        
+        # Baixar malha viária do fim
+        G_end = get_road_network(end_lat_orig, end_lon_orig)
+        if G_end is not None:
+            end_lat_private, end_lon_private, end_snapped = snap_to_nearest_road(
+                G_end, end_lat_noisy, end_lon_noisy
+            )
+        else:
+            end_lat_private = end_lat_noisy
+            end_lon_private = end_lon_noisy
+    else:
+        # Sem map matching: usar coordenadas ruidosas
+        start_lat_private = start_lat_noisy
+        start_lon_private = start_lon_noisy
+        end_lat_private = end_lat_noisy
+        end_lon_private = end_lon_noisy
+    
+    # Calcular deslocamento causado pelo DP + map matching
     start_displacement = euclidean_distance_km(start_lat_orig, start_lon_orig, 
                                                start_lat_private, start_lon_private)
     end_displacement = euclidean_distance_km(end_lat_orig, end_lon_orig, 
@@ -240,6 +360,8 @@ def process_trip(df_trip: pd.DataFrame, trip_id: int, start_timestamp: datetime,
         'end_lon_private': end_lon_private,
         'start_displacement_km': start_displacement,
         'end_displacement_km': end_displacement,
+        'start_map_matched': start_snapped,
+        'end_map_matched': end_snapped,
         'trip_duration_sec': trip_duration,
         'avg_speed_kmh': avg_speed,
         'num_samples': len(df_trip)
@@ -279,6 +401,12 @@ def process_obdlink_csv(input_csv: str, output_csv: str, vin: str = "OBD_VEHICLE
     print(f"🏭 Consumo fabricante: {consumo_fabricante} km/l")
     print(f"💰 Preço carbono: R$ {CARBON_PRICE}/ton")
     print(f"🚦 Modo: {mode_desc}")
+    
+    if MAP_MATCHING_AVAILABLE and ENABLE_MAP_MATCHING:
+        print(f"🗺️  Map matching: ATIVADO (raio {SEARCH_RADIUS}m)")
+    else:
+        print(f"🗺️  Map matching: DESATIVADO")
+    
     print("="*70)
     
     # Extrair timestamp inicial
@@ -363,10 +491,15 @@ def process_obdlink_csv(input_csv: str, output_csv: str, vin: str = "OBD_VEHICLE
             # Mostrar coordenadas antes e depois da privacidade diferencial
             print(f"\n   🔐 PRIVACIDADE DIFERENCIAL (ε={epsilon}):")
             print(f"   📍 Start Original:  ({trip_data['start_lat_orig']:.6f}, {trip_data['start_lon_orig']:.6f})")
-            print(f"   🔒 Start com DP:    ({trip_data['start_lat_private']:.6f}, {trip_data['start_lon_private']:.6f})")
+            
+            snap_status_start = "✓ MAP MATCHED" if trip_data['start_map_matched'] else "⚠ SEM MAP MATCHING"
+            print(f"   🔒 Start Protegido: ({trip_data['start_lat_private']:.6f}, {trip_data['start_lon_private']:.6f}) {snap_status_start}")
             print(f"   📏 Deslocamento:    {trip_data['start_displacement_km']*1000:.1f} metros")
+            
             print(f"   📍 End Original:    ({trip_data['end_lat_orig']:.6f}, {trip_data['end_lon_orig']:.6f})")
-            print(f"   🔒 End com DP:      ({trip_data['end_lat_private']:.6f}, {trip_data['end_lon_private']:.6f})")
+            
+            snap_status_end = "✓ MAP MATCHED" if trip_data['end_map_matched'] else "⚠ SEM MAP MATCHING"
+            print(f"   🔒 End Protegido:   ({trip_data['end_lat_private']:.6f}, {trip_data['end_lon_private']:.6f}) {snap_status_end}")
             print(f"   📏 Deslocamento:    {trip_data['end_displacement_km']*1000:.1f} metros")
             
         except Exception as e:
