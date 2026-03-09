@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-Script para processar dados SUMO e enviar para contrato E1RegistryEuclidean
+Script para processar dados SUMO com Laplace Noise + Haversine (OPÇÃO 1)
 
-Este CSV já contém:
-- CO2 calculado por segmento
-- Distâncias separadas (city/highway)
-- Coordenadas GPS
+DIFERENÇA vs process_sumo_csv.py:
+- process_sumo_csv.py: Usa routing OSMnx para distância com ruído (pode colapsar ou criar atalhos)
+- process_sumo_harversina.py: Usa Haversine puro para distância com ruído (mostra efeito real)
 
-Precisamos:
-- Agregar dados por vehicle_id (cada vehicle_id = 1 viagem)
-- Calcular meta de CO2 baseado em consumo do fabricante
-- Aplicar privacidade diferencial nas coordenadas
-- Enviar para blockchain
+Este script implementa OPÇÃO 1: Haversine direto SEM map matching para distância
+- Map matching usado APENAS para armazenamento (privacidade nas coordenadas salvas)
+- Distância calculada com Haversine nos pontos GPS com ruído (SEM snap)
+- Mostra o verdadeiro efeito zig-zag do ruído Laplace
+- RESULTADO: Distância com ruído reflete o deslocamento real causado pelo Laplace
+           (esperado: 2-5 km para trajetos de ~0.3 km com ε=0.5)
+- VANTAGENS: Rápido (sem API OSM), offline, mostra impacto real do ruído na utilidade
 
 Autor: Victor
-Data: 2026-03-03
+Data: 2026-03-08
 """
 
 import pandas as pd
@@ -434,12 +435,13 @@ def process_sumo_csv(input_csv: str, consumo_fabricante: float = CONSUMO_FABRICA
         DataFrame com viagens agregadas
     """
     print("="*70)
-    print("🚗 PROCESSAMENTO SUMO → E1 REGISTRY")
+    print("🚗 PROCESSAMENTO SUMO → E1 REGISTRY (OPÇÃO 1: Haversine)")
     print("="*70)
     print(f"📄 Entrada: {input_csv}")
     print(f"🏭 Consumo fabricante: {consumo_fabricante} km/l")
     print(f"💰 Preço carbono: R$ {CARBON_PRICE}/ton")
     print(f"🔐 Epsilon (ε): {EPSILON}")
+    print(f"📏 Método distância com ruído: Haversine direto (sem map matching)")
     
     if row_step > 1:
         print(f"⏭️  Row stepping: Processando 1 a cada {row_step} linhas")
@@ -447,7 +449,7 @@ def process_sumo_csv(input_csv: str, consumo_fabricante: float = CONSUMO_FABRICA
         print(f"📊 Row stepping: Processando todas as linhas")
     
     if MAP_MATCHING_AVAILABLE and ENABLE_MAP_MATCHING:
-        print(f"🗺️  Map matching: ATIVADO (raio {SEARCH_RADIUS}m)")
+        print(f"🗺️  Map matching: ATIVADO apenas para armazenamento (raio {SEARCH_RADIUS}m)")
     else:
         print(f"🗺️  Map matching: DESATIVADO")
     
@@ -612,7 +614,7 @@ def process_sumo_csv(input_csv: str, consumo_fabricante: float = CONSUMO_FABRICA
             trajectory_times.append(seg_time.isoformat())
         
         # ========== CALCULAR DISTÂNCIAS DOS TRAJETOS ==========
-        # Usar roteamento OSMnx (segue ruas reais) com filtro de pontos próximos
+        # OPÇÃO 1: Haversine direto (linha reta no globo) para mostrar efeito real do ruído
         
         if MAP_MATCHING_AVAILABLE:
             # Obter grafo que cubra toda a trajetória original
@@ -622,30 +624,22 @@ def process_sumo_csv(input_csv: str, consumo_fabricante: float = CONSUMO_FABRICA
             center_lon_orig = np.mean(lons_orig)
             G_orig = get_road_network(center_lat_orig, center_lon_orig, radius=SEARCH_RADIUS * 2)
             
-            # Calcular distância original com roteamento E filtro de pontos próximos
+            # Calcular distância original com roteamento (para comparação justa com SUMO)
             trajectory_distance_orig, orig_success, orig_fallback, orig_filtered = calculate_trajectory_distance_with_routing(
                 trajectory_points_orig, G_orig, min_distance_m=10.0
             )
             
-            # Obter grafo SEPARADO para trajetória com ruído (pontos podem estar deslocados)
-            lats_noisy = [p[0] for p in trajectory_points_noisy]
-            lons_noisy = [p[1] for p in trajectory_points_noisy]
-            center_lat_noisy = np.mean(lats_noisy)
-            center_lon_noisy = np.mean(lons_noisy)
-            G_noisy = get_road_network(center_lat_noisy, center_lon_noisy, radius=SEARCH_RADIUS * 2)
+            # OPÇÃO 1: Haversine DIRETO nos pontos com ruído (SEM map matching)
+            # Usa pontos GPS com ruído puro para mostrar verdadeiro efeito do Laplace
+            trajectory_distance_priv = calculate_trajectory_distance(trajectory_points_noisy)
             
-            # Calcular distância com ruído usando pontos SEM map matching (evita colapso)
-            trajectory_distance_priv, priv_success, priv_fallback, priv_filtered = calculate_trajectory_distance_with_routing(
-                trajectory_points_noisy, G_noisy, min_distance_m=10.0
-            )
-            
-            # Mostrar estatísticas de roteamento
-            if orig_fallback > 0 or priv_fallback > 0 or orig_filtered != len(trajectory_points_orig) or priv_filtered != len(trajectory_points_noisy):
-                print(f"  🗺️  {vin}: Roteamento OSMnx")
-                print(f"      Original: {len(trajectory_points_orig)} pontos → {orig_filtered} filtrados → {orig_success} rotas OK, {orig_fallback} fallbacks")
-                print(f"      Ruído:    {len(trajectory_points_noisy)} pontos → {priv_filtered} filtrados → {priv_success} rotas OK, {priv_fallback} fallbacks")
+            # Mostrar estatísticas
+            if orig_fallback > 0 or orig_filtered != len(trajectory_points_orig):
+                print(f"  🗺️  {vin}: Cálculo de Distância (OPÇÃO 1: Haversine Direto)")
+                print(f"      Original: {len(trajectory_points_orig)} pontos → {orig_filtered} filtrados → {orig_success} rotas OSMnx, {orig_fallback} fallbacks")
+                print(f"      Ruído:    {len(trajectory_points_noisy)} pontos → Haversine direto (sem map matching)")
         else:
-            # Fallback: usar Haversine simples se OSMnx não disponível
+            # Fallback: usar Haversine para ambos se OSMnx não disponível
             trajectory_distance_orig = calculate_trajectory_distance(trajectory_points_orig)
             trajectory_distance_priv = calculate_trajectory_distance(trajectory_points_noisy)
         

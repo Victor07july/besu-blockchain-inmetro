@@ -1,26 +1,27 @@
 #!/usr/bin/env python3
 """
-Script para processar dados SUMO e enviar para contrato E1RegistryEuclidean
+Script para processar dados SUMO com Laplace Noise + Map Matching Completo (OPÇÃO 2)
 
-Este CSV já contém:
-- CO2 calculado por segmento
-- Distâncias separadas (city/highway)
-- Coordenadas GPS
+DIFERENÇA vs process_sumo_csv.py:
+- process_sumo_csv.py: Filtra pontos próximos antes do routing (pode criar atalhos)
+- process_sumo_alt.py: Faz snap de TODOS os pontos para preservar trajeto completo com ruído
 
-Precisamos:
-- Agregar dados por vehicle_id (cada vehicle_id = 1 viagem)
-- Calcular meta de CO2 baseado em consumo do fabricante
-- Aplicar privacidade diferencial nas coordenadas
-- Enviar para blockchain
+Este script implementa OPÇÃO 2: Map matching em TODOS os pontos intermediários
+- Faz snap de cada ponto com ruído para nó da rede viária
+- Remove apenas nós DUPLICADOS consecutivos (não filtra por distância)
+- Calcula rotas entre todos os nós únicos consecutivos
+- RESULTADO: Distância com ruído maior (0.8-1.5 km vs 0.23 km original)
+           preserva melhor o efeito do ruído Laplace
 
 Autor: Victor
-Data: 2026-03-03
+Data: 2026-03-08
 """
 
 import pandas as pd
 import numpy as np
 import sys
 import json
+import os
 from datetime import datetime
 from web3 import Web3
 from eth_account import Account
@@ -58,7 +59,7 @@ FORCE_SNAP = True            # Forçar snap mesmo se dist > MAX_SNAP_DISTANCE (e
 GRAPH_CACHE = {}             # Cache de grafos baixados
 
 # Stepping de leitura
-ROW_STEP = 50                # Processar a cada N linhas (1=todas, 5=de 5 em 5, etc)
+ROW_STEP = 1                # Processar a cada N linhas (1=todas, 5=de 5 em 5, etc)
 
 # Blockchain
 RPC_URL = "http://localhost:8545"
@@ -195,6 +196,303 @@ def snap_to_nearest_road(G, lat: float, lon: float, lat_orig: float, lon_orig: f
         return lat, lon, False, False
 
 
+def calculate_gps_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """
+    Calcula distância entre dois pontos GPS usando fórmula de Haversine
+    
+    Args:
+        lat1, lon1: Coordenadas do primeiro ponto
+        lat2, lon2: Coordenadas do segundo ponto
+        
+    Returns:
+        Distância em quilômetros
+    """
+    # Raio da Terra em km
+    R = 6371.0
+    
+    # Converter para radianos
+    lat1_rad = np.radians(lat1)
+    lon1_rad = np.radians(lon1)
+    lat2_rad = np.radians(lat2)
+    lon2_rad = np.radians(lon2)
+    
+    # Diferenças
+    dlat = lat2_rad - lat1_rad
+    dlon = lon2_rad - lon1_rad
+    
+    # Fórmula de Haversine
+    a = np.sin(dlat / 2)**2 + np.cos(lat1_rad) * np.cos(lat2_rad) * np.sin(dlon / 2)**2
+    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
+    
+    distance = R * c
+    return distance
+
+
+def calculate_trajectory_distance(trajectory_points: list) -> float:
+    """
+    Calcula a distância total de um trajeto (soma das distâncias entre pontos consecutivos)
+    Usa fórmula de Haversine (linha reta entre pontos)
+    
+    Args:
+        trajectory_points: Lista de [lat, lon]
+        
+    Returns:
+        Distância total em km
+    """
+    if len(trajectory_points) < 2:
+        return 0.0
+    
+    total_distance = 0.0
+    for i in range(len(trajectory_points) - 1):
+        lat1, lon1 = trajectory_points[i]
+        lat2, lon2 = trajectory_points[i + 1]
+        total_distance += calculate_gps_distance(lat1, lon1, lat2, lon2)
+    
+    return total_distance
+
+
+def calculate_route_distance(G, node1, node2) -> float:
+    """
+    Calcula distância seguindo a rede viária entre dois nós
+    
+    Args:
+        G: Grafo da rede viária (OSMnx)
+        node1: ID do nó de origem
+        node2: ID do nó de destino
+        
+    Returns:
+        Distância em km seguindo as ruas, ou None se não houver rota
+    """
+    if not MAP_MATCHING_AVAILABLE or G is None:
+        return None
+    
+    try:
+        # Encontrar caminho mais curto (peso = comprimento das arestas)
+        route = ox.shortest_path(G, node1, node2, weight='length')
+        
+        if route is None:
+            return None
+        
+        # Somar comprimento de todas as arestas do percurso
+        total_distance_m = 0.0
+        for i in range(len(route) - 1):
+            # Pegar dados da aresta
+            edge_data = G[route[i]][route[i + 1]]
+            
+            # OSMnx pode ter múltiplas arestas entre nós, pegar a primeira
+            if isinstance(edge_data, dict):
+                # Múltiplas arestas: pegar a de menor comprimento
+                edge_lengths = [data.get('length', 0) for data in edge_data.values()]
+                edge_length = min(edge_lengths) if edge_lengths else 0
+            else:
+                edge_length = edge_data.get('length', 0)
+            
+            total_distance_m += edge_length
+        
+        # Converter metros para km
+        return total_distance_m / 1000.0
+        
+    except Exception as e:
+        # Rota não encontrada ou erro no cálculo
+        return None
+
+
+def filter_close_points(trajectory_points: list, min_distance_m: float = 10.0) -> tuple:
+    """
+    Filtra pontos muito próximos para evitar colapso no roteamento
+    
+    Args:
+        trajectory_points: Lista de [lat, lon]
+        min_distance_m: Distância mínima entre pontos em metros
+        
+    Returns:
+        Tupla (pontos_filtrados, indices_mantidos)
+    """
+    if len(trajectory_points) < 2:
+        return trajectory_points, list(range(len(trajectory_points)))
+    
+    filtered_points = [trajectory_points[0]]  # Sempre manter o primeiro
+    kept_indices = [0]
+    
+    for i in range(1, len(trajectory_points)):
+        lat_prev, lon_prev = filtered_points[-1]
+        lat_curr, lon_curr = trajectory_points[i]
+        
+        # Calcular distância aproximada em metros
+        dlat = (lat_curr - lat_prev) * 111320
+        dlon = (lon_curr - lon_prev) * 111320 * np.cos(np.radians(lat_prev))
+        distance_m = np.sqrt(dlat**2 + dlon**2)
+        
+        # Manter apenas se distância >= min_distance_m
+        if distance_m >= min_distance_m:
+            filtered_points.append(trajectory_points[i])
+            kept_indices.append(i)
+    
+    # SEMPRE manter o último ponto (mesmo que próximo do penúltimo)
+    if kept_indices[-1] != len(trajectory_points) - 1:
+        filtered_points.append(trajectory_points[-1])
+        kept_indices.append(len(trajectory_points) - 1)
+    
+    return filtered_points, kept_indices
+
+
+def calculate_trajectory_distance_with_routing(trajectory_points: list, G, min_distance_m: float = 10.0) -> tuple:
+    """
+    Calcula distância total seguindo a rede viária (como SUMO faz)
+    Filtra pontos muito próximos para evitar colapso no roteamento
+    
+    Args:
+        trajectory_points: Lista de [lat, lon]
+        G: Grafo da rede viária (OSMnx)
+        min_distance_m: Distância mínima entre pontos para roteamento (metros)
+        
+    Returns:
+        Tupla (distância_total_km, sucesso_count, fallback_count, pontos_filtrados)
+        - distância_total_km: Distância total em km
+        - sucesso_count: Número de segmentos com roteamento bem-sucedido
+        - fallback_count: Número de segmentos que usaram Haversine (fallback)
+        - pontos_filtrados: Número de pontos após filtro
+    """
+    if len(trajectory_points) < 2:
+        return 0.0, 0, 0, 0
+    
+    if not MAP_MATCHING_AVAILABLE or G is None:
+        # Fallback para Haversine simples
+        return calculate_trajectory_distance(trajectory_points), 0, len(trajectory_points) - 1, len(trajectory_points)
+    
+    # Filtrar pontos muito próximos
+    filtered_points, kept_indices = filter_close_points(trajectory_points, min_distance_m)
+    
+    total_distance = 0.0
+    success_count = 0
+    fallback_count = 0
+    
+    for i in range(len(filtered_points) - 1):
+        lat1, lon1 = filtered_points[i]
+        lat2, lon2 = filtered_points[i + 1]
+        
+        try:
+            # Snap pontos para nós mais próximos
+            node1 = ox.nearest_nodes(G, lon1, lat1)
+            node2 = ox.nearest_nodes(G, lon2, lat2)
+            
+            # Se os nós são iguais, usar Haversine (pequena distância)
+            if node1 == node2:
+                haversine_distance = calculate_gps_distance(lat1, lon1, lat2, lon2)
+                total_distance += haversine_distance
+                success_count += 1
+                continue
+            
+            # Calcular distância seguindo a rota
+            route_distance = calculate_route_distance(G, node1, node2)
+            
+            if route_distance is not None:
+                total_distance += route_distance
+                success_count += 1
+            else:
+                # Fallback: usar Haversine
+                haversine_distance = calculate_gps_distance(lat1, lon1, lat2, lon2)
+                total_distance += haversine_distance
+                fallback_count += 1
+                
+        except Exception as e:
+            # Erro ao fazer snap ou calcular rota: usar Haversine
+            haversine_distance = calculate_gps_distance(lat1, lon1, lat2, lon2)
+            total_distance += haversine_distance
+            fallback_count += 1
+    
+    return total_distance, success_count, fallback_count, len(filtered_points)
+
+
+def calculate_trajectory_distance_with_full_map_matching(trajectory_points: list, G) -> tuple:
+    """
+    OPÇÃO 2: Map matching completo para preservar trajeto mais longo com ruído
+    
+    Faz snap de TODOS os pontos (sem filtro prévio) para criar sequência de nós
+    que preserva o trajeto completo com ruído, incluindo o zig-zag do Laplace.
+    
+    Args:
+        trajectory_points: Lista de [lat, lon] com ruído
+        G: Grafo da rede viária (OSMnx)
+        
+    Returns:
+        Tupla (distância_total_km, nós_únicos, rotas_ok, rotas_fallback)
+    """
+    if len(trajectory_points) < 2:
+        return 0.0, 0, 0, 0
+    
+    if not MAP_MATCHING_AVAILABLE or G is None:
+        # Fallback para Haversine simples
+        return calculate_trajectory_distance(trajectory_points), len(trajectory_points), 0, 0
+    
+    try:
+        # ETAPA 1: Fazer snap de TODOS os pontos para nós da rede viária
+        nodes = []
+        for lat, lon in trajectory_points:
+            try:
+                node = ox.nearest_nodes(G, lon, lat)
+                nodes.append(node)
+            except:
+                # Se falhar snap, pular este ponto
+                continue
+        
+        if len(nodes) < 2:
+            # Se não conseguiu snap de pelo menos 2 pontos, usar Haversine
+            return calculate_trajectory_distance(trajectory_points), 0, 0, 0
+        
+        # ETAPA 2: Remover nós duplicados consecutivos (mantém primeiro de cada sequência)
+        unique_nodes = [nodes[0]]
+        for i in range(1, len(nodes)):
+            if nodes[i] != nodes[i-1]:
+                unique_nodes.append(nodes[i])
+        
+        # DEBUG: Verificar quantos nós únicos realmente diferentes temos
+        truly_unique = set(unique_nodes)
+        if len(truly_unique) == 1:
+            # Todos os pontos caíram no mesmo nó - retornar 0
+            return 0.0, len(unique_nodes), 0, 0
+        
+        # ETAPA 3: Calcular rotas entre pares consecutivos de nós únicos
+        total_distance = 0.0
+        routes_ok = 0
+        routes_fallback = 0
+        
+        for i in range(len(unique_nodes) - 1):
+            node1 = unique_nodes[i]
+            node2 = unique_nodes[i + 1]
+            
+            # Sanity check: nós devem ser diferentes (já garantido pelo passo 2)
+            if node1 == node2:
+                continue  # Pular, não deveria acontecer
+            
+            # Calcular rota usando rede viária
+            route_distance = calculate_route_distance(G, node1, node2)
+            
+            if route_distance is not None and route_distance > 0:
+                total_distance += route_distance
+                routes_ok += 1
+            else:
+                # Fallback: usar coordenadas dos nós e calcular Haversine
+                try:
+                    node1_data = G.nodes[node1]
+                    node2_data = G.nodes[node2]
+                    lat1, lon1 = node1_data['y'], node1_data['x']
+                    lat2, lon2 = node2_data['y'], node2_data['x']
+                    haversine_dist = calculate_gps_distance(lat1, lon1, lat2, lon2)
+                    if haversine_dist > 0:
+                        total_distance += haversine_dist
+                        routes_fallback += 1
+                except:
+                    # Se falhar tudo, pular este segmento
+                    pass
+        
+        return total_distance, len(unique_nodes), routes_ok, routes_fallback
+        
+    except Exception as e:
+        # Erro geral: fallback para Haversine
+        return calculate_trajectory_distance(trajectory_points), 0, 0, 0
+
+
 def generate_pseudonimo(vehicle_id: str, salt: str = "E1_PRIVACY") -> str:
     """
     Gera endereço pseudônimo a partir do vehicle_id
@@ -291,10 +589,10 @@ def process_sumo_csv(input_csv: str, consumo_fabricante: float = CONSUMO_FABRICA
         # CO2 em gramas (soma de todos os segmentos)
         co2_real_g = group['CO2'].sum()
         
-        # Distâncias em km
-        total_distance_km = group['distance'].sum()
-        distance_city_km = group['distance_city'].sum()
-        distance_highway_km = group['distance_highway'].sum()
+        # Distâncias em km (SUMO usa valores acumulados, pegar último valor)
+        total_distance_km = group['distance'].iloc[-1] if len(group) > 0 else 0
+        distance_city_km = group['distance_city'].iloc[-1] if len(group) > 0 else 0
+        distance_highway_km = group['distance_highway'].iloc[-1] if len(group) > 0 else 0
         
         # Outros poluentes
         nox_total = group['NOx'].sum()
@@ -358,7 +656,8 @@ def process_sumo_csv(input_csv: str, consumo_fabricante: float = CONSUMO_FABRICA
         
         # ========== PROCESSAR TODOS OS PONTOS DO TRAJETO ==========
         trajectory_points_orig = []
-        trajectory_points_priv = []
+        trajectory_points_noisy = []  # Ruído SEM map matching (para cálculo de distância)
+        trajectory_points_priv = []   # Ruído COM map matching (para armazenamento)
         trajectory_times = []
         
         # Processar cada segmento do trajeto
@@ -374,7 +673,10 @@ def process_sumo_csv(input_csv: str, consumo_fabricante: float = CONSUMO_FABRICA
             seg_lat_noisy = add_laplace_noise(seg_lat, EPSILON)
             seg_lon_noisy = add_laplace_noise(seg_lon, EPSILON)
             
-            # Map matching
+            # Guardar ponto com ruído (SEM map matching) para cálculo de distância preciso
+            trajectory_points_noisy.append([seg_lat_noisy, seg_lon_noisy])
+            
+            # Map matching (apenas para privacidade, não afeta distância)
             if ENABLE_MAP_MATCHING and MAP_MATCHING_AVAILABLE:
                 total_points_processed += 1
                 G_seg = get_road_network(seg_lat, seg_lon)
@@ -398,6 +700,54 @@ def process_sumo_csv(input_csv: str, consumo_fabricante: float = CONSUMO_FABRICA
             trajectory_points_priv.append([seg_lat_priv, seg_lon_priv])
             trajectory_times.append(seg_time.isoformat())
         
+        # ========== CALCULAR DISTÂNCIAS DOS TRAJETOS ==========
+        # OPÇÃO 2: Map matching completo para preservar trajeto mais longo com ruído
+        
+        if MAP_MATCHING_AVAILABLE:
+            # Obter grafo que cubra toda a trajetória original
+            lats_orig = [p[0] for p in trajectory_points_orig]
+            lons_orig = [p[1] for p in trajectory_points_orig]
+            center_lat_orig = np.mean(lats_orig)
+            center_lon_orig = np.mean(lons_orig)
+            G_orig = get_road_network(center_lat_orig, center_lon_orig, radius=SEARCH_RADIUS * 2)
+            
+            # Calcular distância original com roteamento E filtro de pontos próximos (método padrão)
+            trajectory_distance_orig, orig_success, orig_fallback, orig_filtered = calculate_trajectory_distance_with_routing(
+                trajectory_points_orig, G_orig, min_distance_m=10.0
+            )
+            
+            # Obter grafo SEPARADO para trajetória com ruído (pontos podem estar deslocados)
+            lats_noisy = [p[0] for p in trajectory_points_noisy]
+            lons_noisy = [p[1] for p in trajectory_points_noisy]
+            center_lat_noisy = np.mean(lats_noisy)
+            center_lon_noisy = np.mean(lons_noisy)
+            G_noisy = get_road_network(center_lat_noisy, center_lon_noisy, radius=SEARCH_RADIUS * 2)
+            
+            # OPÇÃO 2: Map matching COMPLETO - preserva todos os pontos com ruído
+            # Faz snap de TODOS os pontos (sem filtro) para preservar zig-zag do Laplace
+            trajectory_distance_priv, priv_nodes, priv_success, priv_fallback = calculate_trajectory_distance_with_full_map_matching(
+                trajectory_points_noisy, G_noisy
+            )
+            
+            # Mostrar estatísticas de roteamento
+            if orig_fallback > 0 or priv_fallback > 0 or orig_filtered != len(trajectory_points_orig):
+                print(f"  🗺️  {vin}: Roteamento OSMnx (OPÇÃO 2: Map Matching Completo)")
+                print(f"      Original: {len(trajectory_points_orig)} pontos → {orig_filtered} filtrados → {orig_success} rotas OK, {orig_fallback} fallbacks")
+                print(f"      Ruído:    {len(trajectory_points_noisy)} pontos → {priv_nodes} nós únicos → {priv_success} rotas OK, {priv_fallback} fallbacks")
+        else:
+            # Fallback: usar Haversine simples se OSMnx não disponível
+            trajectory_distance_orig = calculate_trajectory_distance(trajectory_points_orig)
+            trajectory_distance_priv = calculate_trajectory_distance(trajectory_points_noisy)
+        
+        # DEBUG: Verificar se map matching colapsou pontos (não afeta distância)
+        if len(trajectory_points_priv) > 1:
+            unique_points_priv = set(tuple(p) for p in trajectory_points_priv)
+            if len(unique_points_priv) == 1:
+                print(f"  ⚠️  {vin}: Map matching colapsou pontos (NÃO afeta distância)")
+                print(f"      Todos os {len(trajectory_points_priv)} pontos privados → 1 único: {trajectory_points_priv[0]}")
+        
+        trajectory_distance_diff = trajectory_distance_priv - trajectory_distance_orig
+        
         # Guardar trajeto completo
         trajectories.append({
             'vin': vin,
@@ -412,7 +762,10 @@ def process_sumo_csv(input_csv: str, consumo_fabricante: float = CONSUMO_FABRICA
             'trajectory_original': trajectory_points_orig,
             'trajectory_private': trajectory_points_priv,
             'trajectory_times': trajectory_times,
-            'num_points': len(trajectory_points_orig)
+            'num_points': len(trajectory_points_orig),
+            'trajectory_distance_orig_km': trajectory_distance_orig,
+            'trajectory_distance_priv_km': trajectory_distance_priv,
+            'trajectory_distance_diff_km': trajectory_distance_diff
         })
         
         # ========== ARMAZENAR AGREGAÇÕES ==========
@@ -445,7 +798,10 @@ def process_sumo_csv(input_csv: str, consumo_fabricante: float = CONSUMO_FABRICA
             'start_map_matched': start_snapped,
             'end_map_matched': end_snapped,
             'pseudonimo': pseudonimo,
-            'num_segments': len(group)
+            'num_segments': len(group),
+            'trajectory_distance_orig_km': trajectory_distance_orig,
+            'trajectory_distance_priv_km': trajectory_distance_priv,
+            'trajectory_distance_diff_km': trajectory_distance_diff
         })
         
         # Log
@@ -482,6 +838,19 @@ def process_sumo_csv(input_csv: str, consumo_fabricante: float = CONSUMO_FABRICA
         snap_status_end = "✓ MAP MATCHED" if end_snapped else "⚠ SEM MAP MATCHING"
         print(f"   🔒 End Protegido:   ({end_lat_private:.6f}, {end_lon_private:.6f}) {snap_status_end}")
         print(f"   📏 Deslocamento:    {end_displacement_km*1000:.1f} metros")
+        
+        # Mostrar diferença de distância do trajeto
+        print(f"\n   📐 ANÁLISE DE DISTÂNCIA DO TRAJETO:")
+        print(f"   📍 Trajeto original: {trajectory_distance_orig:.3f} km")
+        print(f"   🔒 Trajeto com ruído: {trajectory_distance_priv:.3f} km")
+        diff_sign = "+" if trajectory_distance_diff >= 0 else ""
+        
+        # Calcular percentual (evitar divisão por zero)
+        if trajectory_distance_orig > 0:
+            percent_diff = trajectory_distance_diff / trajectory_distance_orig * 100
+            print(f"   📊 Diferença: {diff_sign}{trajectory_distance_diff:.3f} km ({diff_sign}{percent_diff:.1f}%)")
+        else:
+            print(f"   📊 Diferença: {diff_sign}{trajectory_distance_diff:.3f} km (N/A - distância original é zero)")
     
     # Criar DataFrame
     df_result = pd.DataFrame(results)
@@ -536,6 +905,70 @@ def save_trajectories_json(trajectories: list, output_json: str):
     print(f"💾 Trajetos completos salvos em: {output_json}")
 
 
+def save_distance_analysis_csv(df: pd.DataFrame, output_csv: str):
+    """
+    Salva CSV com análise de diferença de distância entre trajeto original e com ruído
+    
+    Args:
+        df: DataFrame processado com dados agregados
+        output_csv: Caminho do arquivo CSV de saída
+    """
+    # Selecionar colunas relevantes para análise
+    analysis_df = df[[
+        'vin',
+        'model',
+        'total_distance_km',
+        'trajectory_distance_orig_km',
+        'trajectory_distance_priv_km',
+        'trajectory_distance_diff_km',
+        'num_segments',
+        'start_lat_orig',
+        'start_lon_orig',
+        'end_lat_orig',
+        'end_lon_orig',
+        'start_lat_private',
+        'start_lon_private',
+        'end_lat_private',
+        'end_lon_private'
+    ]].copy()
+    
+    # Adicionar coluna de percentual de diferença
+    analysis_df['trajectory_distance_diff_percent'] = (
+        analysis_df['trajectory_distance_diff_km'] / analysis_df['trajectory_distance_orig_km'] * 100
+    )
+    
+    # Renomear colunas para clareza
+    analysis_df.columns = [
+        'VIN',
+        'Modelo',
+        'Distancia_SUMO_km',
+        'Distancia_Trajeto_Original_km',
+        'Distancia_Trajeto_com_Ruido_km',
+        'Diferenca_Distancia_km',
+        'Num_Pontos',
+        'Start_Lat_Original',
+        'Start_Lon_Original',
+        'End_Lat_Original',
+        'End_Lon_Original',
+        'Start_Lat_com_Ruido',
+        'Start_Lon_com_Ruido',
+        'End_Lat_com_Ruido',
+        'End_Lon_com_Ruido',
+        'Diferenca_Distancia_Percentual'
+    ]
+    
+    # Salvar CSV
+    analysis_df.to_csv(output_csv, index=False, float_format='%.4f')
+    print(f"💾 Análise de distâncias salva em: {output_csv}")
+    
+    # Mostrar estatísticas
+    print(f"\n📊 ESTATÍSTICAS DE DIFERENÇA DE DISTÂNCIA:")
+    print(f"   Diferença média: {analysis_df['Diferenca_Distancia_km'].mean():+.3f} km ({analysis_df['Diferenca_Distancia_Percentual'].mean():+.2f}%)")
+    print(f"   Diferença máxima: {analysis_df['Diferenca_Distancia_km'].max():+.3f} km")
+    print(f"   Diferença mínima: {analysis_df['Diferenca_Distancia_km'].min():+.3f} km")
+    print(f"   Desvio padrão: {analysis_df['Diferenca_Distancia_km'].std():.3f} km")
+
+
 def main():
     """Função principal"""
     if len(sys.argv) < 2:
@@ -546,7 +979,22 @@ def main():
         sys.exit(1)
     
     input_file = sys.argv[1]
-    output_file = sys.argv[2] if len(sys.argv) > 2 else 'trips_sumo_processed.csv'
+    
+    # Obter diretório do script para referência
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    data_dir = os.path.join(script_dir, '..', 'data')
+    os.makedirs(data_dir, exist_ok=True)
+    
+    # Processar output_file
+    if len(sys.argv) > 2:
+        output_file = sys.argv[2]
+        # Se for apenas um nome de arquivo (sem caminho), salvar em ../data/
+        if not os.path.dirname(output_file):
+            output_file = os.path.join(data_dir, output_file)
+    else:
+        # Padrão: salvar em ../data/
+        output_file = os.path.join(data_dir, 'trips_laplace_processed.csv')
+    
     consumo_fab = float(sys.argv[3]) if len(sys.argv) > 3 else CONSUMO_FABRICANTE
     step = int(sys.argv[4]) if len(sys.argv) > 4 else ROW_STEP
     
@@ -559,6 +1007,10 @@ def main():
     # Salvar JSON (trajetos completos para visualização)
     json_file = output_file.replace('.csv', '_trajectories.json')
     save_trajectories_json(trajectories, json_file)
+    
+    # Salvar CSV de análise de distâncias
+    analysis_file = output_file.replace('.csv', '_distance_analysis.csv')
+    save_distance_analysis_csv(df_trips, analysis_file)
 
 
 if __name__ == "__main__":
