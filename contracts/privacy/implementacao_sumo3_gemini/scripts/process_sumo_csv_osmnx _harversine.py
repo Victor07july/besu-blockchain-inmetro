@@ -2,6 +2,8 @@
 """
 Script para processar dados SUMO com offset determinístico
 
+=== VERSÃO HAVERSINE PURA (SEM API OPENSTREETMAP PARA DISTÂNCIA) ===
+
 Este CSV já contém:
 - CO2 calculado por segmento
 - Distâncias separadas (city/highway)
@@ -11,7 +13,11 @@ Novidades nesta versão:
 - Offset determinístico (x, y) substituindo privacidade diferencial probabilística
 - Limitação de raio máximo com clipping automático
 - Offset reversível (chave simétrica)
-- Map matching para garantir pontos em vias trafegáveis
+- Map matching para garantir pontos em vias trafegáveis (armazenamento)
+- **DISTÂNCIA CALCULADA COM HAVERSINE DIRETO (linha reta no globo)**
+  - NÃO usa routing OSMnx (evita shortcuts/atalhos)
+  - Calcula distância DOS PONTOS ARMAZENADOS (COM map matching)
+  - Garante consistência: distância corresponde aos pontos salvos
 
 Autor: Victor
 Data: 2026-03-06
@@ -531,10 +537,11 @@ def process_sumo_csv(input_csv: str, consumo_fabricante: float = CONSUMO_FABRICA
         print(f"📊 Row stepping: Processando todas as linhas")
     
     if MAP_MATCHING_AVAILABLE and ENABLE_MAP_MATCHING:
-        print(f"🗺️  Map matching: ATIVADO (raio {SEARCH_RADIUS}m)")
+        print(f"🗺️  Map matching: ATIVADO (raio {SEARCH_RADIUS}m) - pontos snapped para ruas")
     else:
         print(f"🗺️  Map matching: DESATIVADO")
     
+    print(f"📐 Cálculo de distância: HAVERSINE PURO dos pontos COM snap (consistência)")
     print("="*70)
     
     # Ler CSV
@@ -802,43 +809,24 @@ def process_sumo_csv(input_csv: str, consumo_fabricante: float = CONSUMO_FABRICA
                 total_duplicates = 0
         
         # ========== CALCULAR DISTÂNCIAS DOS TRAJETOS ==========
-        # Usar roteamento OSMnx (segue ruas reais) com filtro de pontos próximos
+        # VERSÃO HAVERSINE PURA: Calcular distância direta (linha reta no globo)
+        # SEM usar routing OSMnx para evitar shortcuts/atalhos
+        # Usa pontos COM map matching para consistência (distância dos pontos armazenados)
         
-        if MAP_MATCHING_AVAILABLE:
-            # Obter grafo que cubra toda a trajetória original
-            lats_orig = [p[0] for p in trajectory_points_orig]
-            lons_orig = [p[1] for p in trajectory_points_orig]
-            center_lat_orig = np.mean(lats_orig)
-            center_lon_orig = np.mean(lons_orig)
-            G_orig = get_road_network(center_lat_orig, center_lon_orig, radius=SEARCH_RADIUS * 2)
-            
-            # Calcular distância original com roteamento E filtro de pontos próximos
-            trajectory_distance_orig, orig_success, orig_fallback, orig_filtered = calculate_trajectory_distance_with_routing(
-                trajectory_points_orig, G_orig, min_distance_m=10.0
-            )
-            
-            # Obter grafo que cubra toda a trajetória com offset (SEM map matching)
-            lats_offset = [p[0] for p in trajectory_points_offset]
-            lons_offset = [p[1] for p in trajectory_points_offset]
-            center_lat_offset = np.mean(lats_offset)
-            center_lon_offset = np.mean(lons_offset)
-            G_offset = get_road_network(center_lat_offset, center_lon_offset, radius=SEARCH_RADIUS * 2)
-            
-            # Calcular distância com offset usando roteamento E filtro
-            # IMPORTANTE: usa trajectory_points_offset (SEM map matching) para evitar colapso
-            trajectory_distance_priv, priv_success, priv_fallback, priv_filtered = calculate_trajectory_distance_with_routing(
-                trajectory_points_offset, G_offset, min_distance_m=10.0
-            )
-            
-            # Mostrar estatísticas de roteamento
-            if orig_fallback > 0 or priv_fallback > 0 or orig_filtered != len(trajectory_points_orig) or priv_filtered != len(trajectory_points_offset):
-                print(f"  🗺️  {vin}: Roteamento OSMnx")
-                print(f"      Original: {len(trajectory_points_orig)} pontos → {orig_filtered} filtrados → {orig_success} rotas OK, {orig_fallback} fallbacks")
-                print(f"      Offset:   {len(trajectory_points_offset)} pontos → {priv_filtered} filtrados → {priv_success} rotas OK, {priv_fallback} fallbacks")
-        else:
-            # Fallback: usar Haversine simples se OSMnx não disponível
-            trajectory_distance_orig = calculate_trajectory_distance(trajectory_points_orig)
-            trajectory_distance_priv = calculate_trajectory_distance(trajectory_points_offset)
+        print(f"  📐 {vin}: Calculando distâncias com Haversine direto (SEM routing API)")
+        
+        # Calcular distância original: linha reta entre pontos GPS originais
+        trajectory_distance_orig = calculate_trajectory_distance(trajectory_points_orig)
+        print(f"      Original: {len(trajectory_points_orig)} pontos → {trajectory_distance_orig:.4f} km (Haversine)")
+        
+        # Calcular distância com offset: linha reta entre pontos COM snap (armazenados)
+        # IMPORTANTE: usa trajectory_points_priv (COM map matching) para consistência
+        # A distância calculada corresponde aos pontos que serão armazenados
+        trajectory_distance_priv = calculate_trajectory_distance(trajectory_points_priv)
+        print(f"      Offset:   {len(trajectory_points_priv)} pontos → {trajectory_distance_priv:.4f} km (Haversine)")
+        
+        # Nota: Distância calculada DOS PONTOS ARMAZENADOS (COM snap)
+        # Garante que: pontos armazenados = pontos usados no cálculo (consistência)
         
         # DEBUG: Verificar se map matching colapsou pontos (não afeta distância)
         if len(trajectory_points_priv) > 1:
@@ -947,11 +935,11 @@ def process_sumo_csv(input_csv: str, consumo_fabricante: float = CONSUMO_FABRICA
         print(f"   📏 Deslocamento final: {end_displacement_km*1000:.1f} metros")
         
         # Mostrar diferença de distância do trajeto
-        print(f"\n   📐 ANÁLISE DE DISTÂNCIA DO TRAJETO:")
+        print(f"\n   📐 ANÁLISE DE DISTÂNCIA DO TRAJETO (HAVERSINE DOS PONTOS ARMAZENADOS):")
         if total_duplicates > 0:
             print(f"   ✨ {total_duplicates} pontos privados duplicados foram separados para garantir visualização 1:1.")
-        print(f"   📍 Trajeto original: {trajectory_distance_orig:.3f} km")
-        print(f"   🔒 Trajeto com offset: {trajectory_distance_priv:.3f} km")
+        print(f"   📍 Trajeto original: {trajectory_distance_orig:.3f} km (linha reta entre pontos GPS)")
+        print(f"   🔒 Trajeto com offset: {trajectory_distance_priv:.3f} km (linha reta entre pontos COM snap)")
         diff_sign = "+" if trajectory_distance_diff >= 0 else ""
         
         # Calcular percentual (evitar divisão por zero)
