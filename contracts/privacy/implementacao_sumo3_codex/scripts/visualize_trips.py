@@ -23,6 +23,23 @@ except ImportError:
     sys.exit(1)
 
 
+def get_aligned_trajectory_points(traj: dict):
+    """
+    Retorna apenas os pontos que existem em ambas as trajetórias.
+
+    Isso evita falhas quando o JSON contém execuções sem coordenadas salvas
+    ou com comprimentos diferentes entre original e privado.
+    """
+    trajectory_orig = traj.get('trajectory_original') or []
+    trajectory_priv = traj.get('trajectory_private') or []
+    usable_points = min(len(trajectory_orig), len(trajectory_priv))
+
+    if usable_points == 0:
+        return [], [], 0
+
+    return trajectory_orig[:usable_points], trajectory_priv[:usable_points], usable_points
+
+
 def create_trip_map(trajectories: list, df: pd.DataFrame = None, output_html: str = "trip_comparison.html", vehicle_id: str = None):
     """
     Cria mapa interativo comparando trajeto original vs. com privacidade diferencial
@@ -40,17 +57,32 @@ def create_trip_map(trajectories: list, df: pd.DataFrame = None, output_html: st
         if len(trajectories) == 0:
             print(f"❌ Veículo {vehicle_id} não encontrado!")
             return
+
+    valid_trajectories = []
+    skipped_trajectories = 0
+    for traj in trajectories:
+        trajectory_orig, trajectory_priv, usable_points = get_aligned_trajectory_points(traj)
+        if usable_points == 0:
+            skipped_trajectories += 1
+            continue
+        valid_trajectories.append((traj, trajectory_orig, trajectory_priv, usable_points))
+
+    if len(valid_trajectories) == 0:
+        print("❌ Nenhuma trajetória válida encontrada para gerar o mapa.")
+        return
     
     print("="*70)
     print("🗺️  CRIANDO VISUALIZAÇÃO DE TRAJETOS")
     print("="*70)
-    print(f"Veículos a visualizar: {len(trajectories)}")
+    print(f"Veículos a visualizar: {len(valid_trajectories)}")
+    if skipped_trajectories > 0:
+        print(f"⚠️  Trajetórias ignoradas por falta de pontos válidos: {skipped_trajectories}")
     
     # Calcular centro do mapa (média de todas as coordenadas)
     all_lats = []
     all_lons = []
-    for traj in trajectories:
-        for point in traj['trajectory_original']:
+    for _, trajectory_orig, _, _ in valid_trajectories:
+        for point in trajectory_orig:
             all_lats.append(point[0])
             all_lons.append(point[1])
     
@@ -78,17 +110,14 @@ def create_trip_map(trajectories: list, df: pd.DataFrame = None, output_html: st
     # Processar cada viagem
     import numpy as np
     
-    for traj in trajectories:
+    for traj, trajectory_orig, trajectory_priv, usable_points in valid_trajectories:
         vin = traj['vin']
         model = traj['model']
         delta_co2 = traj['delta_co2_g']
         valor_e1 = traj['valor_e1_reais']
         total_distance = traj['total_distance_km']
         co2_real = traj['co2_real_g']
-        num_points = traj['num_points']
-        
-        trajectory_orig = traj['trajectory_original']  # Lista de [lat, lon]
-        trajectory_priv = traj['trajectory_private']   # Lista de [lat, lon]
+        num_points = usable_points
         
         # Coordenadas de início e fim
         start_orig = trajectory_orig[0]
@@ -98,7 +127,7 @@ def create_trip_map(trajectories: list, df: pd.DataFrame = None, output_html: st
         
         # Calcular deslocamentos total (média de todos os pontos)
         displacements = []
-        for i in range(len(trajectory_orig)):
+        for i in range(usable_points):
             lat_orig, lon_orig = trajectory_orig[i]
             lat_priv, lon_priv = trajectory_priv[i]
             
@@ -239,7 +268,7 @@ def create_trip_map(trajectories: list, df: pd.DataFrame = None, output_html: st
         # (todos os pontos seria muito poluído visualmente)
         step_size = 1  # Mostrar todas as linhas de deslocamento
         
-        for i in range(0, len(trajectory_orig), step_size):
+        for i in range(0, usable_points, step_size):
             color = 'green' if i < len(trajectory_orig) // 2 else 'purple'
             folium.PolyLine(
                 locations=[trajectory_orig[i], trajectory_priv[i]],
@@ -353,12 +382,19 @@ def create_summary_statistics(trajectories: list):
     # Calcular deslocamentos de todos os pontos de todas as viagens
     all_displacements = []
     total_points = 0
+    valid_trips = 0
+    skipped_trips = 0
     
     for traj in trajectories:
-        trajectory_orig = traj['trajectory_original']
-        trajectory_priv = traj['trajectory_private']
+        trajectory_orig, trajectory_priv, usable_points = get_aligned_trajectory_points(traj)
+
+        if usable_points == 0:
+            skipped_trips += 1
+            continue
+
+        valid_trips += 1
         
-        for i in range(len(trajectory_orig)):
+        for i in range(usable_points):
             lat_orig, lon_orig = trajectory_orig[i]
             lat_priv, lon_priv = trajectory_priv[i]
             
@@ -369,6 +405,10 @@ def create_summary_statistics(trajectories: list):
             
             all_displacements.append(disp)
             total_points += 1
+
+    if total_points == 0:
+        print("\n❌ Nenhum ponto válido encontrado para calcular estatísticas.")
+        return
     
     print(f"\n📊 Deslocamentos (metros):")
     print(f"   Total de pontos: {total_points}")
@@ -380,8 +420,9 @@ def create_summary_statistics(trajectories: list):
     
     # Estatísticas por viagem
     print(f"\n📊 Por viagem:")
-    print(f"   Viagens: {len(trajectories)}")
-    print(f"   Média de pontos/viagem: {total_points / len(trajectories):.1f}")
+    print(f"   Viagens válidas: {valid_trips}")
+    print(f"   Viagens ignoradas: {skipped_trips}")
+    print(f"   Média de pontos/viagem válida: {total_points / valid_trips:.1f}")
     
     print("="*70)
 
@@ -422,9 +463,17 @@ def main():
     print("="*70)
     
     generated_files = []
+    skipped_files = 0
     for idx, traj in enumerate(trajectories, start=1):
         vehicle_id = traj['vin']
         run_id = traj.get('run_id', idx)
+        _, _, usable_points = get_aligned_trajectory_points(traj)
+
+        if usable_points == 0:
+            print(f"\n⚠️  Pulando {vehicle_id} (trajeto/run {run_id}): sem pontos válidos para desenhar")
+            skipped_files += 1
+            continue
+
         # Criar nome de arquivo limpo (remover caracteres especiais)
         safe_name = vehicle_id.replace('/', '_').replace('\\', '_')
         output_file = os.path.join(output_dir, f"trip_{safe_name}_run_{run_id:03d}.html")
@@ -440,6 +489,8 @@ def main():
     print(f"\n📁 Arquivos criados em: {output_dir}/")
     for f in generated_files:
         print(f"   - {os.path.basename(f)}")
+    if skipped_files > 0:
+        print(f"\n⚠️  Mapas ignorados por falta de pontos válidos: {skipped_files}")
     
     print("\n💡 COMO USAR:")
     print(f"   1. Navegue até a pasta: {output_dir}/")
