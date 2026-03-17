@@ -28,7 +28,11 @@ import pandas as pd
 import numpy as np
 import sys
 import json
+import os
+import glob
+import threading
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from web3 import Web3
 from eth_account import Account
 import hashlib
@@ -66,6 +70,7 @@ FORCE_UNIQUE_POINTS = True  # False: mantém duplicados | True: tenta re-snap pa
 CANCEL_OFFSET_DISCARD_RATIO = 1.1  # Cancela offset se >=50% dos pontos forem descartados
 FORCE_SNAP = True            # Forçar snap mesmo se dist > MAX_SNAP_DISTANCE (evita mar)
 GRAPH_CACHE = {}             # Cache de grafos baixados
+GRAPH_CACHE_LOCK = threading.Lock()  # Proteção para acesso concorrente ao cache
 
 # Stepping de leitura
 ROW_STEP = 1                # Processar a cada N linhas (1=todas, 5=de 5 em 5, etc)
@@ -180,8 +185,9 @@ def get_road_network(lat: float, lon: float, radius: int = SEARCH_RADIUS):
     # Cache key baseado em região aproximada (2 casas decimais = ~1km)
     cache_key = (round(lat, 2), round(lon, 2))
     
-    if cache_key in GRAPH_CACHE:
-        return GRAPH_CACHE[cache_key]
+    with GRAPH_CACHE_LOCK:
+        if cache_key in GRAPH_CACHE:
+            return GRAPH_CACHE[cache_key]
     
     # Tentar com raios crescentes
     radii_to_try = [radius, radius * 2, radius * 3]
@@ -197,7 +203,8 @@ def get_road_network(lat: float, lon: float, radius: int = SEARCH_RADIUS):
             )
             
             if len(G.nodes) > 0:
-                GRAPH_CACHE[cache_key] = G
+                with GRAPH_CACHE_LOCK:
+                    GRAPH_CACHE[cache_key] = G
                 if attempt > 1:
                     print(f"  🗺️  Grafo encontrado na tentativa {attempt} (raio={r}m): {len(G.nodes)} nós")
                 return G
@@ -1257,23 +1264,226 @@ def save_distance_analysis_csv(df: pd.DataFrame, output_csv: str):
     print(f"   Desvio padrão: {analysis_df['Diferenca_Distancia_km'].std():.3f} km")
 
 
+def discover_input_csv_files(input_path: str) -> list:
+    """
+    Descobre arquivos CSV de entrada para processamento.
+
+    Args:
+        input_path: Caminho para arquivo CSV único ou diretório com CSVs
+
+    Returns:
+        Lista ordenada de caminhos de CSV
+    """
+    if os.path.isfile(input_path):
+        return [input_path]
+
+    if not os.path.isdir(input_path):
+        return []
+
+    preferred = sorted(glob.glob(os.path.join(input_path, "vehicles_step*.csv")))
+    candidates = preferred if preferred else sorted(glob.glob(os.path.join(input_path, "*.csv")))
+
+    # Evita reprocessar saídas já geradas pelo próprio script
+    filtered = []
+    for file_path in candidates:
+        name = os.path.basename(file_path)
+        if (
+            name.startswith("trips_")
+            or name.endswith("_distance_analysis.csv")
+            or "processed" in name
+            or "consolidated" in name
+        ):
+            continue
+        filtered.append(file_path)
+
+    return filtered
+
+
+def process_single_file_all_runs_task(task: tuple) -> tuple:
+    """Executa todas as runs de um único CSV (1 worker dedicado por arquivo)."""
+    input_file, output_dir, num_runs, consumo_fab, step, max_radius, target_vehicle = task
+    base_name = os.path.splitext(os.path.basename(input_file))[0]
+    source_name = os.path.basename(input_file)
+
+    file_output_dir = os.path.join(output_dir, base_name)
+    os.makedirs(file_output_dir, exist_ok=True)
+
+    file_dfs = []
+    file_trajectories = []
+
+    for run_id in range(1, num_runs + 1):
+        print(f"\n[{base_name}] ▶ run {run_id:03d}/{num_runs:03d}")
+
+        df_trips, trajectories = process_sumo_csv(
+            input_file,
+            consumo_fab,
+            step,
+            max_radius,
+            target_vehicle,
+        )
+
+        if df_trips.empty:
+            df_run = pd.DataFrame(columns=['run_id', 'source_csv'])
+        else:
+            df_run = df_trips.copy()
+            df_run.insert(0, 'run_id', run_id)
+            df_run.insert(1, 'source_csv', source_name)
+
+        for t in trajectories:
+            t['run_id'] = run_id
+            t['source_csv'] = source_name
+
+        run_csv = os.path.join(file_output_dir, f"run_{run_id:03d}.csv")
+        save_to_csv(df_run, run_csv)
+
+        if not df_run.empty:
+            file_dfs.append(df_run)
+        file_trajectories.extend(trajectories)
+
+    if file_dfs:
+        df_file_all = pd.concat(file_dfs, ignore_index=True)
+    else:
+        df_file_all = pd.DataFrame()
+
+    return input_file, df_file_all, file_trajectories
+
+
+def run_batch_parallel(
+    input_dir: str,
+    output_dir: str,
+    consumo_fab: float,
+    step: int,
+    max_radius: float,
+    num_runs: int,
+    target_vehicle: str,
+):
+    """
+    Processa múltiplos CSVs em paralelo com workers.
+    Para cada CSV de entrada, executa num_runs offsets aleatórios e salva um CSV por execução.
+    """
+    input_files = discover_input_csv_files(input_dir)
+    if not input_files:
+        print(f"❌ Nenhum CSV encontrado em: {input_dir}")
+        sys.exit(1)
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    print("\n" + "="*70)
+    print("🚀 MODO LOTE PARALELO")
+    print("="*70)
+    print(f"📂 Diretório de entrada: {input_dir}")
+    print(f"💾 Diretório de saída: {output_dir}")
+    print(f"📄 CSVs encontrados: {len(input_files)}")
+    print(f"🔁 Execuções por CSV: {num_runs}")
+    print(f"🧵 Workers: {len(input_files)} (1 por CSV)")
+    print(f"📦 Total de tarefas: {len(input_files)} arquivos (cada worker executa {num_runs} runs)")
+    print("="*70)
+
+    for idx, file_path in enumerate(input_files, 1):
+        print(f"   {idx:02d}. {os.path.basename(file_path)}")
+
+    tasks = [
+        (input_file, output_dir, num_runs, consumo_fab, step, max_radius, target_vehicle)
+        for input_file in input_files
+    ]
+
+    all_dfs = []
+    all_trajectories = []
+    completed = 0
+    total_tasks = len(tasks)
+    workers = len(input_files)
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_task = {
+            executor.submit(process_single_file_all_runs_task, task): task
+            for task in tasks
+        }
+
+        for future in as_completed(future_to_task):
+            task = future_to_task[future]
+            input_file = task[0]
+            base_name = os.path.splitext(os.path.basename(input_file))[0]
+
+            try:
+                _, df_file_all, trajectories = future.result()
+            except Exception as e:
+                print(f"\n❌ Falha no CSV {base_name}: {e}")
+                completed += 1
+                print(f"⏱️  Progresso de arquivos: {completed}/{total_tasks}")
+                continue
+
+            if not df_file_all.empty:
+                all_dfs.append(df_file_all)
+            all_trajectories.extend(trajectories)
+
+            completed += 1
+            print(f"⏱️  Progresso de arquivos: {completed}/{total_tasks} | {base_name} concluído")
+
+    print("\n" + "="*70)
+    print("✅ PROCESSAMENTO LOTE CONCLUÍDO")
+    print("="*70)
+
+    if all_dfs:
+        df_all = pd.concat(all_dfs, ignore_index=True)
+        consolidated_csv = os.path.join(output_dir, "all_runs_consolidated.csv")
+        save_to_csv(df_all, consolidated_csv)
+
+        trajectories_json = os.path.join(output_dir, "all_runs_trajectories.json")
+        save_trajectories_json(all_trajectories, trajectories_json)
+
+        analysis_csv = os.path.join(output_dir, "all_runs_distance_analysis.csv")
+        save_distance_analysis_csv(df_all, analysis_csv)
+
+        print(f"📊 Registros consolidados: {len(df_all)}")
+    else:
+        print("⚠️  Nenhum resultado consolidado foi gerado (todas tarefas retornaram vazio).")
+
+
 def main():
     """Função principal"""
     if len(sys.argv) < 2:
-        print("Uso: python3 process_sumo_csv.py <input.csv> [output.csv] [consumo_fabricante] [row_step] [max_radius_km] [num_runs] [vehicle_id]")
+        print("Uso (arquivo único):")
+        print("  python3 process_sumo_csv.py <input.csv> [output.csv] [consumo_fabricante] [row_step] [max_radius_km] [num_runs] [vehicle_id]")
+        print("Uso (lote paralelo):")
+        print("  python3 process_sumo_csv.py <input_dir> [output_dir] [consumo_fabricante] [row_step] [max_radius_km] [num_runs] [vehicle_id]")
         print("\nExemplos:")
         print("  python3 process_sumo_csv.py ../data/vehicles_step.csv")
         print("  python3 process_sumo_csv.py ../data/vehicles_step.csv ../data/trips_veh0.csv 12.0")
         print("  python3 process_sumo_csv.py ../data/vehicles_step.csv ../data/trips_veh0.csv 12.0 1 3.0 100")
         print("  python3 process_sumo_csv.py ../data/vehicles_step.csv ../data/trips_carro1000.csv 12.0 1 2.0 1 carro_1000")
+        print("  python3 process_sumo_csv.py ../data ../data/offset_batch 12.0 1 2.0 100 carro_1000")
         print("\nParâmetros:")
         print("  max_radius_km: Raio máximo do offset aleatório em km (padrão: 2.0)")
         print("  num_runs:      Número de execuções com offsets aleatórios distintos (padrão: 100)")
         print("  vehicle_id:    ID do veículo alvo (opcional; padrão: auto-detect)")
+        print("  modo lote:     usa 1 worker por CSV automaticamente")
         print("\nNota: a cada execução um offset x/y aleatório é gerado dentro do raio.")
         sys.exit(1)
 
-    input_file = sys.argv[1]
+    input_path = sys.argv[1]
+
+    # Modo lote: input é diretório
+    if os.path.isdir(input_path):
+        output_dir = sys.argv[2] if len(sys.argv) > 2 else os.path.join(input_path, "offset_batch_results")
+        consumo_fab = float(sys.argv[3]) if len(sys.argv) > 3 else CONSUMO_FABRICANTE
+        step = int(sys.argv[4]) if len(sys.argv) > 4 else ROW_STEP
+        max_radius = float(sys.argv[5]) if len(sys.argv) > 5 else MAX_RADIUS_KM
+        num_runs = int(sys.argv[6]) if len(sys.argv) > 6 else 100
+        target_vehicle = sys.argv[7] if len(sys.argv) > 7 else TARGET_VEHICLE_ID
+
+        run_batch_parallel(
+            input_path,
+            output_dir,
+            consumo_fab,
+            step,
+            max_radius,
+            num_runs,
+            target_vehicle,
+        )
+        return
+
+    # Modo arquivo único (comportamento original)
+    input_file = input_path
     output_file = sys.argv[2] if len(sys.argv) > 2 else '../data/trips_sumo_processed.csv'
     consumo_fab = float(sys.argv[3]) if len(sys.argv) > 3 else CONSUMO_FABRICANTE
     step = int(sys.argv[4]) if len(sys.argv) > 4 else ROW_STEP
