@@ -31,7 +31,10 @@ import json
 import os
 import glob
 import re
+import io
 import threading
+import time
+from contextlib import redirect_stdout
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from web3 import Web3
@@ -72,6 +75,9 @@ CANCEL_OFFSET_DISCARD_RATIO = 1.1  # Cancela offset se >=50% dos pontos forem de
 FORCE_SNAP = True            # Forçar snap mesmo se dist > MAX_SNAP_DISTANCE (evita mar)
 GRAPH_CACHE = {}             # Cache de grafos baixados
 GRAPH_CACHE_LOCK = threading.Lock()  # Proteção para acesso concorrente ao cache
+PRINT_LOCK = threading.Lock()  # Evita embaralhamento de logs entre workers
+DEBUG_MAP_MATCHING = False    # Logs detalhados de tentativas map matching
+HEARTBEAT_SECONDS = 20        # Intervalo de heartbeat por run em paralelo (0 desativa)
 
 # Stepping de leitura
 ROW_STEP = 1                # Processar a cada N linhas (1=todas, 5=de 5 em 5, etc)
@@ -81,6 +87,28 @@ TARGET_VEHICLE_ID = None    # None: auto-detect (veh0 se existir, senão primeir
 RPC_URL = "http://localhost:8545"
 CHAIN_ID = 1337
 # =======================================================
+
+
+def thread_safe_print(*args, **kwargs):
+    """Imprime mensagens protegendo contra interleaving entre threads."""
+    with PRINT_LOCK:
+        kwargs.setdefault('file', sys.__stdout__)
+        kwargs.setdefault('flush', True)
+        print(*args, **kwargs)
+
+
+def debug_map_print(*args, **kwargs):
+    """Imprime logs detalhados de map matching apenas quando habilitado."""
+    if DEBUG_MAP_MATCHING:
+        print(*args, **kwargs)
+
+
+def append_log_file(file_path: str, text: str):
+    """Apende texto em arquivo de log de forma thread-safe."""
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    with PRINT_LOCK:
+        with open(file_path, 'a', encoding='utf-8') as f:
+            f.write(text)
 
 
 def calculate_offset_distance(offset_x: float, offset_y: float, latitude: float) -> float:
@@ -841,7 +869,7 @@ def process_sumo_csv(
             G_traj = get_road_network(center_lat_priv, center_lon_priv, radius=SEARCH_RADIUS * 2)
 
             if G_traj is not None:
-                print(f"\n   [DEBUG] Iniciando verificação de pontos duplicados para {vin}...")
+                debug_map_print(f"\n   [DEBUG] Iniciando verificação de pontos duplicados para {vin}...")
                 final_points = []
                 existing_points_set = set()
                 duplicates_found_count = 0
@@ -858,10 +886,10 @@ def process_sumo_csv(
 
                     # PONTO DUPLICADO ENCONTRADO! Iniciar pesquisa por um novo ponto.
                     duplicates_found_count += 1
-                    print(f"\n   [DEBUG] Ponto duplicado encontrado no índice {i}: {current_tuple}")
+                    debug_map_print(f"\n   [DEBUG] Ponto duplicado encontrado no índice {i}: {current_tuple}")
 
                     if not FORCE_UNIQUE_POINTS:
-                        print("      ==> Duplicado mantido (FORCE_UNIQUE_POINTS=False).")
+                        debug_map_print("      ==> Duplicado mantido (FORCE_UNIQUE_POINTS=False).")
                         final_points.append(current_point)
                         continue
                     
@@ -870,7 +898,7 @@ def process_sumo_csv(
                     for attempt in range(1, MAX_MAP_MATCHING_ATTEMPTS + 1):
                         # Raio da pesquisa aumenta a cada tentativa (5.5m, 11m, ... até ~110m)
                         search_radius_deg = attempt * 5e-5
-                        print(f"      [ATTEMPT {attempt}] Raio de busca: {search_radius_deg:.5f} graus")
+                        debug_map_print(f"      [ATTEMPT {attempt}] Raio de busca: {search_radius_deg:.5f} graus")
 
                         # Pesquisar em 8 direções para "empurrar" o ponto
                         directions = [
@@ -900,19 +928,19 @@ def process_sumo_csv(
                             resnapped_tuple = (resnapped_lat, resnapped_lon)
                             
                             is_unique = resnapped_tuple not in existing_points_set
-                            print(f"         [DIR {dir_name}] Ponto re-snap: {resnapped_tuple} | É único? {is_unique}")
+                            debug_map_print(f"         [DIR {dir_name}] Ponto re-snap: {resnapped_tuple} | É único? {is_unique}")
                             
                             if is_unique:
                                 current_point = [resnapped_lat, resnapped_lon]
                                 found_unique_point = True
-                                print(f"      ==> Ponto único encontrado na tentativa {attempt}!")
+                                debug_map_print(f"      ==> Ponto único encontrado na tentativa {attempt}!")
                                 break
                         
                         if found_unique_point:
                             break
                     
                     if not found_unique_point:
-                        print(f"      ==> AVISO: Limite de tentativas ({MAX_MAP_MATCHING_ATTEMPTS}) excedido no índice {i}. Mantendo ponto duplicado.")
+                        debug_map_print(f"      ==> AVISO: Limite de tentativas ({MAX_MAP_MATCHING_ATTEMPTS}) excedido no índice {i}. Mantendo ponto duplicado.")
                         final_points.append(current_point)
                         continue
                     
@@ -1142,6 +1170,8 @@ def process_sumo_csv(
         print(f"\n   📐 ANÁLISE DE DISTÂNCIA DO TRAJETO (HAVERSINE DOS PONTOS ARMAZENADOS):")
         if total_duplicates > 0:
             print(f"   ✨ {total_duplicates} pontos privados duplicados foram separados para garantir visualização 1:1.")
+            if not DEBUG_MAP_MATCHING:
+                print("   ℹ️  Dica: use --debug-map-matching para ver tentativas detalhadas de re-snap.")
         print(f"   🔢 Pontos original/offset: {trajectory_points_orig_count}/{trajectory_points_priv_count} (Δ {trajectory_points_diff:+d}, {trajectory_points_diff_percent:+.1f}% )")
         print(f"   📍 Trajeto original: {trajectory_distance_orig:.3f} km (linha reta entre pontos GPS)")
         print(f"   🔒 Trajeto com offset: {trajectory_distance_priv:.3f} km (linha reta entre pontos COM snap)")
@@ -1373,6 +1403,7 @@ def process_single_file_all_runs_task(task: tuple) -> tuple:
     base_name = os.path.splitext(os.path.basename(input_file))[0]
     source_name = os.path.basename(input_file)
     worker_name = threading.current_thread().name
+    worker_log_path = os.path.join(output_dir, "_logs", f"{worker_name}.log")
 
     file_output_dir = os.path.join(output_dir, base_name)
     os.makedirs(file_output_dir, exist_ok=True)
@@ -1380,22 +1411,51 @@ def process_single_file_all_runs_task(task: tuple) -> tuple:
     file_dfs = []
     file_trajectories = []
 
-    print(f"\n[{worker_name}] iniciou arquivo {base_name} ({num_runs} runs)")
+    thread_safe_print(f"\n[{worker_name}] iniciou arquivo {base_name} ({num_runs} runs)")
+    append_log_file(
+        worker_log_path,
+        f"\n{'='*90}\nINICIO CSV: {base_name} | runs={num_runs} | source={source_name}\n{'='*90}\n",
+    )
 
     for run_id in range(1, num_runs + 1):
         progress_pct = (run_id / num_runs) * 100
-        print(
+        thread_safe_print(
             f"\n[{worker_name}] [{base_name}] ▶ run {run_id:03d}/{num_runs:03d} "
             f"({progress_pct:.1f}% do worker neste CSV)"
         )
 
-        df_trips, trajectories = process_sumo_csv(
-            input_file,
-            consumo_fab,
-            step,
-            max_radius,
-            target_vehicle,
+        run_log_capture = io.StringIO()
+        heartbeat_stop = threading.Event()
+
+        def run_heartbeat():
+            if HEARTBEAT_SECONDS <= 0:
+                return
+            started_at = time.monotonic()
+            while not heartbeat_stop.wait(HEARTBEAT_SECONDS):
+                elapsed_s = int(time.monotonic() - started_at)
+                thread_safe_print(
+                    f"[{worker_name}] [{base_name}] ⏳ run {run_id:03d}/{num_runs:03d} em andamento "
+                    f"({elapsed_s}s, aguardando conclusão desta execução)"
+                )
+
+        heartbeat_thread = threading.Thread(
+            target=run_heartbeat,
+            name=f"{worker_name}-heartbeat",
+            daemon=True,
         )
+        heartbeat_thread.start()
+
+        with redirect_stdout(run_log_capture):
+            df_trips, trajectories = process_sumo_csv(
+                input_file,
+                consumo_fab,
+                step,
+                max_radius,
+                target_vehicle,
+            )
+
+        heartbeat_stop.set()
+        heartbeat_thread.join(timeout=1)
 
         if df_trips.empty:
             df_run = pd.DataFrame(columns=['run_id', 'source_csv', 'trajectory_id'])
@@ -1411,13 +1471,34 @@ def process_single_file_all_runs_task(task: tuple) -> tuple:
         attach_trajectory_ids(df_run, trajectories, source_name, run_id)
 
         run_csv = os.path.join(file_output_dir, f"run_{run_id:03d}.csv")
-        save_to_csv(df_run, run_csv)
+        with redirect_stdout(run_log_capture):
+            save_to_csv(df_run, run_csv)
+
+        run_log = run_log_capture.getvalue().strip()
+        if run_log:
+            append_log_file(
+                worker_log_path,
+                (
+                    f"\n[{worker_name}] [{base_name}] ===== LOG RUN {run_id:03d} INICIO =====\n"
+                    f"{run_log}\n"
+                    f"[{worker_name}] [{base_name}] ===== LOG RUN {run_id:03d} FIM =====\n"
+                ),
+            )
+
+        thread_safe_print(
+            f"[{worker_name}] [{base_name}] ✅ run {run_id:03d}/{num_runs:03d} finalizada "
+            f"(log em {worker_log_path})"
+        )
 
         if not df_run.empty:
             file_dfs.append(df_run)
         file_trajectories.extend(trajectories)
 
-    print(f"[{worker_name}] finalizou arquivo {base_name}")
+    thread_safe_print(f"[{worker_name}] finalizou arquivo {base_name}")
+    append_log_file(
+        worker_log_path,
+        f"\nFIM CSV: {base_name}\n",
+    )
 
     if file_dfs:
         df_file_all = pd.concat(file_dfs, ignore_index=True)
@@ -1447,19 +1528,19 @@ def run_batch_parallel(
 
     os.makedirs(output_dir, exist_ok=True)
 
-    print("\n" + "="*70)
-    print("🚀 MODO LOTE PARALELO")
-    print("="*70)
-    print(f"📂 Diretório de entrada: {input_dir}")
-    print(f"💾 Diretório de saída: {output_dir}")
-    print(f"📄 CSVs encontrados: {len(input_files)}")
-    print(f"🔁 Execuções por CSV: {num_runs}")
-    print(f"🧵 Workers: {len(input_files)} (1 por CSV)")
-    print(f"📦 Total de tarefas: {len(input_files)} arquivos (cada worker executa {num_runs} runs)")
-    print("="*70)
+    thread_safe_print("\n" + "="*70)
+    thread_safe_print("🚀 MODO LOTE PARALELO")
+    thread_safe_print("="*70)
+    thread_safe_print(f"📂 Diretório de entrada: {input_dir}")
+    thread_safe_print(f"💾 Diretório de saída: {output_dir}")
+    thread_safe_print(f"📄 CSVs encontrados: {len(input_files)}")
+    thread_safe_print(f"🔁 Execuções por CSV: {num_runs}")
+    thread_safe_print(f"🧵 Workers: {len(input_files)} (1 por CSV)")
+    thread_safe_print(f"📦 Total de tarefas: {len(input_files)} arquivos (cada worker executa {num_runs} runs)")
+    thread_safe_print("="*70)
 
     for idx, file_path in enumerate(input_files, 1):
-        print(f"   {idx:02d}. {os.path.basename(file_path)}")
+        thread_safe_print(f"   {idx:02d}. {os.path.basename(file_path)}")
 
     tasks = [
         (input_file, output_dir, num_runs, consumo_fab, step, max_radius, target_vehicle)
@@ -1486,9 +1567,9 @@ def run_batch_parallel(
             try:
                 _, worker_name, df_file_all, trajectories = future.result()
             except Exception as e:
-                print(f"\n❌ Falha no CSV {base_name}: {e}")
+                thread_safe_print(f"\n❌ Falha no CSV {base_name}: {e}")
                 completed += 1
-                print(f"⏱️  Progresso de arquivos: {completed}/{total_tasks}")
+                thread_safe_print(f"⏱️  Progresso de arquivos: {completed}/{total_tasks}")
                 continue
 
             if not df_file_all.empty:
@@ -1496,14 +1577,14 @@ def run_batch_parallel(
             all_trajectories.extend(trajectories)
 
             completed += 1
-            print(
+            thread_safe_print(
                 f"⏱️  Progresso de arquivos: {completed}/{total_tasks} | "
                 f"{base_name} concluído por [{worker_name}]"
             )
 
-    print("\n" + "="*70)
-    print("✅ PROCESSAMENTO LOTE CONCLUÍDO")
-    print("="*70)
+    thread_safe_print("\n" + "="*70)
+    thread_safe_print("✅ PROCESSAMENTO LOTE CONCLUÍDO")
+    thread_safe_print("="*70)
 
     if all_dfs:
         df_all = pd.concat(all_dfs, ignore_index=True)
@@ -1516,42 +1597,75 @@ def run_batch_parallel(
         analysis_csv = os.path.join(output_dir, "all_runs_distance_analysis.csv")
         save_distance_analysis_csv(df_all, analysis_csv)
 
-        print(f"📊 Registros consolidados: {len(df_all)}")
+        thread_safe_print(f"📊 Registros consolidados: {len(df_all)}")
     else:
-        print("⚠️  Nenhum resultado consolidado foi gerado (todas tarefas retornaram vazio).")
+        thread_safe_print("⚠️  Nenhum resultado consolidado foi gerado (todas tarefas retornaram vazio).")
 
 
 def main():
     """Função principal"""
-    if len(sys.argv) < 2:
+    raw_args = sys.argv[1:]
+    positional_args = []
+    global DEBUG_MAP_MATCHING, HEARTBEAT_SECONDS
+
+    i = 0
+    while i < len(raw_args):
+        arg = raw_args[i]
+        if arg == "--debug-map-matching":
+            DEBUG_MAP_MATCHING = True
+            i += 1
+            continue
+        if arg.startswith("--heartbeat-seconds="):
+            HEARTBEAT_SECONDS = int(arg.split("=", 1)[1])
+            i += 1
+            continue
+        if arg == "--heartbeat-seconds":
+            if i + 1 >= len(raw_args):
+                print("❌ --heartbeat-seconds requer um valor inteiro.")
+                sys.exit(1)
+            HEARTBEAT_SECONDS = int(raw_args[i + 1])
+            i += 2
+            continue
+
+        positional_args.append(arg)
+        i += 1
+
+    if len(positional_args) < 1:
         print("Uso (arquivo único):")
-        print("  python3 process_sumo_csv.py <input.csv> [output.csv] [consumo_fabricante] [row_step] [max_radius_km] [num_runs] [vehicle_id]")
+        print("  python3 process_sumo_csv.py <input.csv> [output.csv] [consumo_fabricante] [row_step] [max_radius_km] [num_runs] [vehicle_id] [--debug-map-matching] [--heartbeat-seconds N]")
         print("Uso (lote paralelo):")
-        print("  python3 process_sumo_csv.py <input_dir> [output_dir] [consumo_fabricante] [row_step] [max_radius_km] [num_runs] [vehicle_id]")
+        print("  python3 process_sumo_csv.py <input_dir> [output_dir] [consumo_fabricante] [row_step] [max_radius_km] [num_runs] [vehicle_id] [--debug-map-matching] [--heartbeat-seconds N]")
         print("\nExemplos:")
         print("  python3 process_sumo_csv.py ../data/vehicles_step.csv")
         print("  python3 process_sumo_csv.py ../data/vehicles_step.csv ../data/trips_veh0.csv 12.0")
         print("  python3 process_sumo_csv.py ../data/vehicles_step.csv ../data/trips_veh0.csv 12.0 1 3.0 100")
         print("  python3 process_sumo_csv.py ../data/vehicles_step.csv ../data/trips_carro1000.csv 12.0 1 2.0 1 carro_1000")
         print("  python3 process_sumo_csv.py ../data ../data/offset_batch 12.0 1 2.0 100 carro_1000")
+        print("  python3 process_sumo_csv.py ../data ../data/offset_batch 12.0 1 2.0 100 carro_1000 --heartbeat-seconds 15")
         print("\nParâmetros:")
         print("  max_radius_km: Raio máximo do offset aleatório em km (padrão: 2.0)")
         print("  num_runs:      Número de execuções com offsets aleatórios distintos (padrão: 100)")
         print("  vehicle_id:    ID do veículo alvo (opcional; padrão: auto-detect)")
+        print("  --debug-map-matching: mostra logs detalhados de tentativas de re-snap")
+        print("  --heartbeat-seconds: heartbeat de progresso por run (padrão: 20, 0 desativa)")
         print("  modo lote:     usa 1 worker por CSV automaticamente")
         print("\nNota: a cada execução um offset x/y aleatório é gerado dentro do raio.")
         sys.exit(1)
 
-    input_path = sys.argv[1]
+    input_path = positional_args[0]
 
     # Modo lote: input é diretório
     if os.path.isdir(input_path):
-        output_dir = sys.argv[2] if len(sys.argv) > 2 else os.path.join(input_path, "offset_batch_results")
-        consumo_fab = float(sys.argv[3]) if len(sys.argv) > 3 else CONSUMO_FABRICANTE
-        step = int(sys.argv[4]) if len(sys.argv) > 4 else ROW_STEP
-        max_radius = float(sys.argv[5]) if len(sys.argv) > 5 else MAX_RADIUS_KM
-        num_runs = int(sys.argv[6]) if len(sys.argv) > 6 else 100
-        target_vehicle = sys.argv[7] if len(sys.argv) > 7 else TARGET_VEHICLE_ID
+        output_dir = positional_args[1] if len(positional_args) > 1 else os.path.join(input_path, "offset_batch_results")
+        consumo_fab = float(positional_args[2]) if len(positional_args) > 2 else CONSUMO_FABRICANTE
+        step = int(positional_args[3]) if len(positional_args) > 3 else ROW_STEP
+        max_radius = float(positional_args[4]) if len(positional_args) > 4 else MAX_RADIUS_KM
+        num_runs = int(positional_args[5]) if len(positional_args) > 5 else 100
+        target_vehicle = positional_args[6] if len(positional_args) > 6 else TARGET_VEHICLE_ID
+
+        thread_safe_print(
+            f"\n⚙️  Opções de log: debug_map_matching={DEBUG_MAP_MATCHING} | heartbeat={HEARTBEAT_SECONDS}s"
+        )
 
         run_batch_parallel(
             input_path,
@@ -1566,14 +1680,15 @@ def main():
 
     # Modo arquivo único (comportamento original)
     input_file = input_path
-    output_file = sys.argv[2] if len(sys.argv) > 2 else '../data/trips_sumo_processed.csv'
-    consumo_fab = float(sys.argv[3]) if len(sys.argv) > 3 else CONSUMO_FABRICANTE
-    step = int(sys.argv[4]) if len(sys.argv) > 4 else ROW_STEP
-    max_radius = float(sys.argv[5]) if len(sys.argv) > 5 else MAX_RADIUS_KM
-    num_runs = int(sys.argv[6]) if len(sys.argv) > 6 else 100
-    target_vehicle = sys.argv[7] if len(sys.argv) > 7 else TARGET_VEHICLE_ID
+    output_file = positional_args[1] if len(positional_args) > 1 else '../data/trips_sumo_processed.csv'
+    consumo_fab = float(positional_args[2]) if len(positional_args) > 2 else CONSUMO_FABRICANTE
+    step = int(positional_args[3]) if len(positional_args) > 3 else ROW_STEP
+    max_radius = float(positional_args[4]) if len(positional_args) > 4 else MAX_RADIUS_KM
+    num_runs = int(positional_args[5]) if len(positional_args) > 5 else 100
+    target_vehicle = positional_args[6] if len(positional_args) > 6 else TARGET_VEHICLE_ID
 
     print(f"\n🔁 Iniciando {num_runs} execuções com offsets aleatórios (raio máximo: {max_radius} km)\n")
+    print(f"⚙️  Opções de log: debug_map_matching={DEBUG_MAP_MATCHING} | heartbeat={HEARTBEAT_SECONDS}s")
 
     all_dfs = []
     all_trajectories = []

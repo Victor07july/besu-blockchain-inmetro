@@ -32,6 +32,7 @@ except ImportError:
 
 
 EARTH_RADIUS_KM = 6371.0
+DEFAULT_MAX_TARGET_ERROR_PERCENT = 5.0
 
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -347,6 +348,56 @@ def process_csv(
 	return results
 
 
+def confirm_large_target_error(
+	results: List[Dict],
+	max_target_error_percent: float,
+) -> bool:
+	"""
+	Valida proximidade do alvo e pede confirmacao quando erro excede limite.
+
+	Retorna True para continuar e False para abortar.
+	"""
+	exceeded = [
+		r
+		for r in results
+		if float(r["privacy"]["error_to_target_percent"]) > float(max_target_error_percent)
+	]
+
+	if not exceeded:
+		return True
+
+	print("=" * 70)
+	print("AVISO: NAO FOI POSSIVEL ATINGIR O ALVO DE PRIVACIDADE DENTRO DO LIMITE")
+	print("=" * 70)
+	print(f"Limite configurado de erro para o alvo: {max_target_error_percent:.2f}%")
+	print(f"Veiculos fora do limite: {len(exceeded)}")
+
+	for r in exceeded:
+		privacy = r["privacy"]
+		best_attempt = r["best_attempt"]
+		offset = best_attempt["offset"]
+		print("-" * 70)
+		print(f"Veiculo: {r['vehicle_id']}")
+		print(f"Alvo solicitado: {privacy['target_percent']:.2f}%")
+		print(f"Melhor diferenca encontrada: {privacy['best_abs_diff_percent']:.2f}%")
+		print(f"Erro para o alvo: {privacy['error_to_target_percent']:.2f}%")
+		print(
+			"Offset mais proximo encontrado: "
+			f"lat={offset['offset_lat_deg']:.8f}, "
+			f"lon={offset['offset_lon_deg']:.8f}, "
+			f"dist={offset['distance_km']:.4f} km, "
+			f"angulo={offset['angle_deg']:.2f}"
+		)
+
+	while True:
+		answer = input("Deseja continuar mesmo assim? [s/N]: ").strip().lower()
+		if answer in ("s", "sim", "y", "yes"):
+			return True
+		if answer in ("", "n", "nao", "não", "no"):
+			return False
+		print("Resposta invalida. Digite 's' para continuar ou 'n' para abortar.")
+
+
 def save_outputs(results: List[Dict], output_dir: str) -> Tuple[str, str]:
 	os.makedirs(output_dir, exist_ok=True)
 
@@ -455,6 +506,12 @@ def main() -> None:
 		help="Ativa snap para malha viaria (se osmnx estiver instalado)",
 	)
 	parser.add_argument("--search-radius-m", type=int, default=1500, help="Raio de busca da malha viaria")
+	parser.add_argument(
+		"--max-target-error-percent",
+		type=float,
+		default=DEFAULT_MAX_TARGET_ERROR_PERCENT,
+		help="Erro maximo permitido em relacao ao alvo de privacidade antes de pedir confirmacao",
+	)
 	parser.add_argument("--seed", type=int, default=None, help="Seed aleatoria para reproducibilidade")
 	parser.add_argument("--output-dir", default="../data/oraculo_offset", help="Diretorio de saida")
 
@@ -488,6 +545,10 @@ def main() -> None:
 		enable_map_matching=mm_enabled,
 		search_radius_m=args.search_radius_m,
 	)
+
+	if not confirm_large_target_error(results, args.max_target_error_percent):
+		print("Execucao cancelada pelo usuario devido ao limite de erro para o alvo.")
+		return
 
 	result_json, summary_csv = save_outputs(results, args.output_dir)
 
