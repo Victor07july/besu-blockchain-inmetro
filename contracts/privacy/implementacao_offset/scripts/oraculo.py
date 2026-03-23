@@ -17,6 +17,7 @@ import json
 import math
 import os
 import random
+import time
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -33,6 +34,11 @@ except ImportError:
 
 EARTH_RADIUS_KM = 6371.0
 DEFAULT_MAX_TARGET_ERROR_PERCENT = 5.0
+
+
+def progress_print(message: str) -> None:
+	"""Impressao com flush para acompanhamento em tempo real."""
+	print(message, flush=True)
 
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -209,6 +215,7 @@ def evaluate_attempts(
 	max_radius_km: float,
 	enable_map_matching: bool,
 	search_radius_m: int,
+	progress_every: int,
 ) -> Dict:
 	orig_km = trajectory_distance_km(trajectory_original)
 	if not trajectory_original:
@@ -216,8 +223,27 @@ def evaluate_attempts(
 
 	ref_lat = sum(p[0] for p in trajectory_original) / len(trajectory_original)
 	tries: List[Dict] = []
+	started = time.monotonic()
+
+	progress_print(
+		f"[{vehicle_id}] Iniciando busca do melhor offset: "
+		f"{attempts} tentativas | alvo={target_percent:.2f}% | map_matching={enable_map_matching}"
+	)
 
 	for i in range(1, attempts + 1):
+		if i == 1 or i == attempts or i % progress_every == 0:
+			elapsed_s = int(time.monotonic() - started)
+			if tries:
+				best_so_far = min(tries, key=lambda x: x["error_to_target_percent"])
+				best_err = best_so_far["error_to_target_percent"]
+				best_diff = best_so_far["distance"]["abs_diff_percent"]
+				progress_print(
+					f"[{vehicle_id}] Tentativa {i}/{attempts} | "
+					f"melhor_abs_diff={best_diff:.2f}% | melhor_erro={best_err:.2f}% | {elapsed_s}s"
+				)
+			else:
+				progress_print(f"[{vehicle_id}] Tentativa {i}/{attempts} | iniciando... | {elapsed_s}s")
+
 		offset_lat, offset_lon, offset_dist_km, offset_angle_deg = generate_random_offset(max_radius_km, ref_lat)
 		offset_points = apply_offset(trajectory_original, offset_lat, offset_lon)
 		private_points = maybe_map_match(offset_points, enable_map_matching, search_radius_m)
@@ -248,6 +274,12 @@ def evaluate_attempts(
 		)
 
 	best = min(tries, key=lambda x: x["error_to_target_percent"])
+	total_elapsed_s = int(time.monotonic() - started)
+	progress_print(
+		f"[{vehicle_id}] Concluido: melhor tentativa={best['attempt']} | "
+		f"abs_diff={best['distance']['abs_diff_percent']:.2f}% | "
+		f"erro_alvo={best['error_to_target_percent']:.2f}% | {total_elapsed_s}s"
+	)
 	audit_hash = build_audit_hash(vehicle_id, trajectory_original)
 
 	result = {
@@ -290,7 +322,9 @@ def process_csv(
 	vehicle_id_filter: Optional[str],
 	enable_map_matching: bool,
 	search_radius_m: int,
+	progress_every: int,
 ) -> List[Dict]:
+	progress_print(f"Lendo CSV: {input_csv}")
 	df = pd.read_csv(input_csv)
 	columns = detect_columns(df)
 
@@ -321,11 +355,18 @@ def process_csv(
 		raise ValueError("Nenhum dado encontrado apos filtros")
 
 	results: List[Dict] = []
+	total_groups = df[vehicle_col].nunique()
+	progress_print(
+		f"Veiculos para processar: {total_groups} | "
+		f"tentativas_por_veiculo={attempts} | map_matching={enable_map_matching}"
+	)
 
-	for vehicle_id, group in df.groupby(vehicle_col):
+	for idx, (vehicle_id, group) in enumerate(df.groupby(vehicle_col), start=1):
+		progress_print(f"\n[{idx}/{total_groups}] Veiculo {vehicle_id}: preparando trajetoria...")
 		group = group.sort_values(by=["_sort_time", "_sort_end_time", "_row_order"], kind="mergesort")
 		trajectory_original = build_trajectory_from_group(group, columns)
 		if len(trajectory_original) < 2:
+			progress_print(f"[{vehicle_id}] Ignorado: trajetoria com menos de 2 pontos.")
 			continue
 
 		sumo_distance_km = extract_cumulative_distance_max(group, columns["distance"])
@@ -339,6 +380,7 @@ def process_csv(
 			max_radius_km=max_radius_km,
 			enable_map_matching=enable_map_matching,
 			search_radius_m=search_radius_m,
+			progress_every=progress_every,
 		)
 		results.append(result)
 
@@ -507,6 +549,12 @@ def main() -> None:
 	)
 	parser.add_argument("--search-radius-m", type=int, default=1500, help="Raio de busca da malha viaria")
 	parser.add_argument(
+		"--progress-every",
+		type=int,
+		default=5,
+		help="Exibe progresso a cada N tentativas (padrao: 5)",
+	)
+	parser.add_argument(
 		"--max-target-error-percent",
 		type=float,
 		default=DEFAULT_MAX_TARGET_ERROR_PERCENT,
@@ -534,7 +582,17 @@ def main() -> None:
 	mm_enabled = args.enable_map_matching and MAP_MATCHING_AVAILABLE
 
 	if args.enable_map_matching and not MAP_MATCHING_AVAILABLE:
-		print("[aviso] Map matching solicitado, mas osmnx/shapely nao estao instalados. Continuando sem map matching.")
+		progress_print("[aviso] Map matching solicitado, mas osmnx/shapely nao estao instalados. Continuando sem map matching.")
+
+	if args.progress_every <= 0:
+		raise ValueError("--progress-every deve ser >= 1")
+
+	progress_print("=" * 70)
+	progress_print("ORACULO OFFSET - INICIO")
+	progress_print("=" * 70)
+	progress_print(f"CSV: {args.input_csv}")
+	progress_print(f"attempts={args.attempts} | target={args.target_privacy_percent:.2f}% | raio={args.max_radius_km} km")
+	progress_print(f"map_matching={mm_enabled} | search_radius_m={args.search_radius_m} | progress_every={args.progress_every}")
 
 	results = process_csv(
 		input_csv=args.input_csv,
@@ -544,20 +602,21 @@ def main() -> None:
 		vehicle_id_filter=args.vehicle_id,
 		enable_map_matching=mm_enabled,
 		search_radius_m=args.search_radius_m,
+		progress_every=args.progress_every,
 	)
 
 	if not confirm_large_target_error(results, args.max_target_error_percent):
-		print("Execucao cancelada pelo usuario devido ao limite de erro para o alvo.")
+		progress_print("Execucao cancelada pelo usuario devido ao limite de erro para o alvo.")
 		return
 
 	result_json, summary_csv = save_outputs(results, args.output_dir)
 
-	print("=" * 70)
-	print("ORACULO OFFSET FINALIZADO")
-	print("=" * 70)
-	print(f"Veiculos processados: {len(results)}")
-	print(f"Resultados JSON: {result_json}")
-	print(f"Resumo CSV: {summary_csv}")
+	progress_print("=" * 70)
+	progress_print("ORACULO OFFSET FINALIZADO")
+	progress_print("=" * 70)
+	progress_print(f"Veiculos processados: {len(results)}")
+	progress_print(f"Resultados JSON: {result_json}")
+	progress_print(f"Resumo CSV: {summary_csv}")
 
 	if args.send_onchain:
 		if not args.private_key:
@@ -574,7 +633,7 @@ def main() -> None:
 			method_name=args.method_name,
 			method_args_spec=args.method_arg,
 		)
-		print(f"Transacoes enviadas: {len(txs)}")
+		progress_print(f"Transacoes enviadas: {len(txs)}")
 
 
 if __name__ == "__main__":
