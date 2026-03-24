@@ -368,6 +368,18 @@ def calculate_trajectory_distance(trajectory_points: list) -> float:
     return total_distance
 
 
+def count_unique_points(points: list, decimals: int = 7) -> int:
+    """Conta pontos unicos com arredondamento para reduzir ruido numerico."""
+    if not points:
+        return 0
+
+    normalized = {
+        (round(float(p[0]), decimals), round(float(p[1]), decimals))
+        for p in points
+    }
+    return len(normalized)
+
+
 def calculate_route_distance(G, node1, node2) -> float:
     """
     Calcula distância seguindo a rede viária entre dois nós
@@ -957,8 +969,9 @@ def process_sumo_csv(
         # ========== REGRA DE CANCELAMENTO DO OFFSET ==========
         # Se 50% ou mais dos pontos ultrapassaram o limite de tentativas,
         # cancelar esta execução de offset e seguir para a próxima.
-        trajectory_points_orig_count = len(trajectory_points_orig)
-        trajectory_points_priv_count = len(trajectory_points_priv)
+        # Contagem para analise deve desconsiderar duplicados.
+        trajectory_points_orig_count = count_unique_points(trajectory_points_orig)
+        trajectory_points_priv_count = count_unique_points(trajectory_points_priv)
         trajectory_points_diff = trajectory_points_priv_count - trajectory_points_orig_count
         trajectory_points_diff_percent = (
             (trajectory_points_diff / trajectory_points_orig_count) * 100
@@ -1172,7 +1185,7 @@ def process_sumo_csv(
             print(f"   ✨ {total_duplicates} pontos privados duplicados foram separados para garantir visualização 1:1.")
             if not DEBUG_MAP_MATCHING:
                 print("   ℹ️  Dica: use --debug-map-matching para ver tentativas detalhadas de re-snap.")
-        print(f"   🔢 Pontos original/offset: {trajectory_points_orig_count}/{trajectory_points_priv_count} (Δ {trajectory_points_diff:+d}, {trajectory_points_diff_percent:+.1f}% )")
+        print(f"   🔢 Pontos unicos original/offset: {trajectory_points_orig_count}/{trajectory_points_priv_count} (Δ {trajectory_points_diff:+d}, {trajectory_points_diff_percent:+.1f}% )")
         print(f"   📍 Trajeto original: {trajectory_distance_orig:.3f} km (linha reta entre pontos GPS)")
         print(f"   🔒 Trajeto com offset: {trajectory_distance_priv:.3f} km (linha reta entre pontos COM snap)")
         diff_sign = "+" if trajectory_distance_diff >= 0 else ""
