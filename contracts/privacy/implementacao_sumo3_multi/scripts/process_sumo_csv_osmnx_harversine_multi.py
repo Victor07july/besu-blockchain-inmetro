@@ -54,6 +54,15 @@ except ImportError:
     print("   Este script exige map matching e não pode executar sem osmnx.")
     print("   Instale com: pip install osmnx")
 
+try:
+    import sklearn  # noqa: F401 - valida dependencia opcional exigida pelo OSMnx
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    SKLEARN_AVAILABLE = False
+    print("❌ Dependência obrigatória ausente: scikit-learn")
+    print("   O OSMnx exige scikit-learn para busca em grafo não projetado.")
+    print("   Instale com: pip install scikit-learn")
+
 # ==================== CONFIGURAÇÕES ====================
 # Consumo do fabricante (km/l)
 CONSUMO_FABRICANTE = 12.0
@@ -1685,6 +1694,10 @@ def main():
     if not MAP_MATCHING_AVAILABLE:
         print("\n❌ Execução abortada: osmnx não está instalado no ambiente Python atual.")
         print("   Ative o ambiente correto e instale: pip install osmnx")
+        sys.exit(1)
+    if not SKLEARN_AVAILABLE:
+        print("\n❌ Execução abortada: scikit-learn não está instalado no ambiente Python atual.")
+        print("   Ative o ambiente correto e instale: pip install scikit-learn")
         sys.exit(1)
 
     raw_args = sys.argv[1:]
