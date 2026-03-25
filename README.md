@@ -1,4 +1,4 @@
-# Besu Dev Quickstart
+# Besu Dev Starter
 
 ## **Important**
 For this repository work properly the `env` file must be renamed and `.example` extension must be removed.
@@ -6,22 +6,30 @@ For security reasons, the original env files were not versioned.
 
 The following env files needs to be renamed:
 
-`.env.example` (in the project's base path)
-`quorum-explorer/env.example`
-`config/besu/.env.example`
+- `.env.example` (in the project's base path)
+- `quorum-explorer/env.example` 
+- `config/besu/.env.example`
+
+To run this project in production, other files need to be removed from git, like Besu members keys.
 
 ## Table of Contents
 
-- [Besu Dev Quickstart](#besu-dev-quickstart)
+- [Besu Dev Starter](#besu-dev-starter)
   - [**Important**](#important)
   - [Table of Contents](#table-of-contents)
   - [Prerequisites](#prerequisites)
   - [Usage](#usage)
   - [Dev Network Setups](#dev-network-setups)
-    - [i. POA Network ](#i-poa-network-)
+    - [i. Proof of Authority (POA) Network ](#i-proof-of-authority-poa-network-)
     - [ii. POA Network with Privacy ](#ii-poa-network-with-privacy-)
     - [iii. Smart Contracts \& DApps ](#iii-smart-contracts--dapps-)
   - [Moving to production](#moving-to-production)
+  - [Security Proposal](#security-proposal)
+- [Configurations](#configurations)
+  - [Environment Variables](#environment-variables)
+  - [Cryptographic Keys](#cryptographic-keys)
+  - [Certificate](#certificate)
+- [Postman Collection](#postman-collection)
 
 ## Prerequisites
 
@@ -43,7 +51,7 @@ To run these tutorials, you must have the following installed:
 
 Change directory to the artifacts folder:
 
-`cd quorum-test-network` (default folder location)
+`cd besu-starter` (default folder location)
 
 **To start services and the network:**
 
@@ -57,7 +65,7 @@ Change directory to the artifacts folder:
 
 ## Dev Network Setups
 
-All our documentation can be found on the [Besu documentation site](https://besu.hyperledger.org/Tutorials/Examples/Private-Network-Example/).
+The documentation can be found on the [Besu documentation site](https://besu.hyperledger.org/Tutorials/Examples/Private-Network-Example/).
 
 Each quickstart setup is comprised of 4 validators, one RPC node and some monitoring tools like:
 
@@ -66,12 +74,14 @@ Each quickstart setup is comprised of 4 validators, one RPC node and some monito
 - Optional [logs monitoring](https://besu.hyperledger.org/en/latest/HowTo/Monitor/Elastic-Stack/) to give you real time logs of the nodes. This feature is enabled with a `-e` flag when starting the sample network
 
 The overall architecture diagrams to visually show components of the blockchain networks is shown below.
-**Consensus Algorithm**: The Besu based Quorum variant uses the `IBFT2` consensus mechanism.
+**Consensus Algorithm**: The Besu based Quorum variant uses the `IBFT2` consensus mechanism. But, we configured the QBFT Quorum  variant for this starter.
 **Private TX Manager**: Both blockchain clients use [Tessera](https://docs.tessera.consensys.net/en/latest/)
+
+For this starter we removed the monitoring containers to reduce the burder from the server during development and tests. For now, we maintain the EthSigner and Tessera containers to run the private network, however both applications are deprecated and we will remove than soon.
 
 ![Image blockchain](./static/blockchain-network.png)
 
-### i. POA Network <a name="poa-network"></a>
+### i. Proof of Authority (POA) Network <a name="poa-network"></a>
 
 This is the simplest of the networks available and will spin up a blockchain network comprising 4 validators, 1 RPC
 node which has an [EthSigner](http://docs.ethsigner.consensys.net/) proxy container linked to it so you can optionally sign transactions. To view the progress
@@ -221,3 +231,58 @@ and search for the transaction where you can see its details recorded. Metamask 
 When you are ready to move to production, please create new keys for your nodes using the
 [Quorum Genesis Tool](https://www.npmjs.com/package/quorum-genesis-tool) and read through the the
 [Besu documentation](https://besu.hyperledger.org/en/latest/HowTo/Deploy/Cloud/)
+
+
+## Security Proposal
+
+This proposal presents mechanisms to imrpove the security of a private network using the Hyperledge Besu stack. Here we use three main services from AWS, the Virtual Private Cloud (VPC), the Web Application Firewall (WAF), and the  Elastic Compute Cloud (EC2), but they can be replaced by any cloud provider, and also include other services to handle load balance, reverse proxy, and identity verifications. 
+
+The VPC is important to allow configuring the network and enable security rules for the blockchain system. Since it needs to connect to other application and, possibly, other nodes that will compose the private blockchain, it's important to restric the access to the EC2 instance. The WAF is a regular firewall service that also allows to implement security rules and reduce the surface attack from outside the VPC. The EC2 instance is basically a virtual machine running the containers with the Hyperledge Besu system, the Nginx web server and an authentication service.
+
+We suggested the Nginx as HTTP web server due to it's light weight and such as reverse proxy and load balance. The reverse proxy is an important feature to enable the HTTPS by providing a digital certificate and redirect to the correct page. The authentication service is a simple web application connected to a database that works as a middleware to check users identity when the system receives requests to endpoints that need administrator permission. 
+
+Another important change in this proposal is the creation of two RPC nodes one that allows access to read information from the blockchain and create new transaction that must be stored, and a second that allows adminstrator requests that impact on the blockchain architecture. The image below presents the proposed architecture.
+
+<p align="center">
+  <img src="./static/Besu-security-proposal.png" alt="Besu Security Proposal"/>
+</p>
+
+# Configurations
+
+To run the project properly it is important to configure the environment variables, cryptographic keys and certificate. 
+
+## Environment Variables
+The files `.env.exmaple` provide examples of the required configurations for each service. Following is a list of the files that you can copy and create your `.env` file.
+
+1. `./.env.example` at the root of the project
+2. `./quorum-explorer/.env.example` 
+3. `./config/besu/.env.example`
+4. `./auth/src/config/.env.example`
+
+## Cryptographic Keys
+
+Fist, we must configure the cryptographic keys, secrets and token duration due to the JWT authentication schema in the comunication between authentication and RPC-admin services, and to control users access. 
+First, Besu nodes were configured to use RSA keys to sign the JSON web tokens. To create a pair of keys you can run the following commands:
+
+```shell
+openssl genrsa -out privateRSAKey.pem 4096
+openssl rsa -in privateRSAKey.pem -pubout -out publicRSAKey.pem
+mv publicRSAKey.pem ./config/besu/publicRSAKey.pem
+```
+
+Lastly, The private key must be set as environment variable inside `./auth/src/config/.env.example` as `BESU_JWT_PRIVATE_KEY`.
+
+
+## Certificate
+The Nginx service needs a certificate to operate with HTTPS, without it the service will not start. If you don't have a certificate yet, you can check the instruction on [Nginx README](./config/nginx/README.MD) about how to generate an autosigned certificate.
+
+
+# Postman Collection
+
+To help test the platform we developed a Postman Collection that can be imported using the file `besu-starter.postman_collection.json`. For now, we provide requests to sign in and sign up users, and to test the connection with the Besu blockchain. We will provide more examples and update the collection as we develop new endpoints.
+
+## Contract Deployment via API
+
+The platform provides endpoints for compiling and deploying Solidity smart contracts. For detailed instructions on how to deploy contracts via Postman, including both direct deployment and signed transaction methods, refer to the [Contract Deployment Guide](./auth/README.md).
+
+

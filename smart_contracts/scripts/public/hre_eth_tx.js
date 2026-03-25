@@ -1,15 +1,27 @@
 const path = require('path');
 const fs = require('fs-extra');
 var ethers = require('ethers');
-
+var token = require('./token');
+const { FetchRequest } = require("ethers");
 // member1 details
 const { accounts, besu } = require("../keys.js");
-const host = besu.rpcnode.url;
+const host = new FetchRequest(besu.rpcnode.url);
+
 // one of the seeded accounts
 const accountAPrivateKey = accounts.a.privateKey;
 
-async function main(){
-  const provider = new ethers.JsonRpcProvider(host);
+async function main() {
+
+  
+
+  const accessToken = await token.getAcess();
+
+  host.setHeader("Authorization", `Bearer ${accessToken}`);
+
+
+  const provider = new ethers.JsonRpcProvider(host, 1337);
+
+
 
   const walletA = new ethers.Wallet(accountAPrivateKey, provider);
   var accountABalance = await provider.getBalance(walletA.address);
@@ -22,13 +34,13 @@ async function main(){
 
   const nonce = await provider.getTransactionCount(walletA.address);
   const feeData = await provider.getFeeData();
-  const gasLimit = await provider.estimateGas({from: walletA.address, value: ethers.parseEther("0.01")});
+  const gasLimit = await provider.estimateGas({ from: walletA.address, value: ethers.parseEther("0.01") });
 
   // send some eth from A to B
   const txn = {
     nonce: nonce,
     from: walletA.address,
-    to: walletB.address, 
+    to: walletB.address,
     value: 0x10,  //amount of eth to transfer
     gasPrice: feeData.gasPrice, //ETH per unit of gas
     gasLimit: gasLimit //max number of gas units the tx is allowed to use
