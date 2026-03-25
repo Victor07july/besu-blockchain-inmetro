@@ -34,7 +34,8 @@ import re
 import io
 import threading
 import time
-from contextlib import redirect_stdout
+import traceback
+from contextlib import redirect_stdout, redirect_stderr
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from web3 import Web3
@@ -49,7 +50,8 @@ try:
     MAP_MATCHING_AVAILABLE = True
 except ImportError:
     MAP_MATCHING_AVAILABLE = False
-    print("⚠️  osmnx não instalado. Map matching desabilitado.")
+    print("❌ Dependência obrigatória ausente: osmnx")
+    print("   Este script exige map matching e não pode executar sem osmnx.")
     print("   Instale com: pip install osmnx")
 
 # ==================== CONFIGURAÇÕES ====================
@@ -70,13 +72,13 @@ ENABLE_MAP_MATCHING = True   # True: Aplicar snap to road | False: Apenas offset
 SEARCH_RADIUS = 1500         # Raio de busca da malha viária (metros)
 MAX_SNAP_DISTANCE = 100      # Distância máxima preferida para snap (metros)
 MAX_MAP_MATCHING_ATTEMPTS = 20  # Máximo de tentativas de re-snap para ponto duplicado
-FORCE_UNIQUE_POINTS = False  # False: mantém duplicados | True: tenta re-snap para ponto único
+FORCE_UNIQUE_POINTS = True  # False: mantém duplicados | True: tenta re-snap para ponto único
 CANCEL_OFFSET_DISCARD_RATIO = 1.1  # Cancela offset se >=50% dos pontos forem descartados
 FORCE_SNAP = True            # Forçar snap mesmo se dist > MAX_SNAP_DISTANCE (evita mar)
 GRAPH_CACHE = {}             # Cache de grafos baixados
 GRAPH_CACHE_LOCK = threading.Lock()  # Proteção para acesso concorrente ao cache
 PRINT_LOCK = threading.Lock()  # Evita embaralhamento de logs entre workers
-DEBUG_MAP_MATCHING = False    # Logs detalhados de tentativas map matching
+DEBUG_MAP_MATCHING = True    # Logs detalhados de tentativas map matching
 HEARTBEAT_SECONDS = 20        # Intervalo de heartbeat por run em paralelo (0 desativa)
 
 # Stepping de leitura
@@ -221,6 +223,9 @@ def get_road_network(lat: float, lon: float, radius: int = SEARCH_RADIUS):
     # Tentar com raios crescentes
     radii_to_try = [radius, radius * 2, radius * 3]
     
+    last_error = None
+    empty_graph_attempts = 0
+
     for attempt, r in enumerate(radii_to_try, 1):
         try:
             # Baixar grafo de ruas trafegáveis
@@ -237,11 +242,35 @@ def get_road_network(lat: float, lon: float, radius: int = SEARCH_RADIUS):
                 if attempt > 1:
                     print(f"  🗺️  Grafo encontrado na tentativa {attempt} (raio={r}m): {len(G.nodes)} nós")
                 return G
+            empty_graph_attempts += 1
+            print(
+                f"⚠️  Tentativa {attempt}/{len(radii_to_try)} sem nós na malha viária "
+                f"(lat={lat:.6f}, lon={lon:.6f}, raio={r}m)."
+            )
                 
         except Exception as e:
-            if attempt == len(radii_to_try):
-                print(f"⚠️  Erro ao baixar grafo após {attempt} tentativas: {e}")
+            last_error = e
+            print(
+                f"⚠️  Falha na tentativa {attempt}/{len(radii_to_try)} ao baixar grafo "
+                f"(lat={lat:.6f}, lon={lon:.6f}, raio={r}m): {type(e).__name__}: {e}"
+            )
             continue
+
+    if last_error is not None:
+        print(
+            f"❌ Map matching indisponível para ponto lat={lat:.6f}, lon={lon:.6f} "
+            f"após {len(radii_to_try)} tentativas (último erro: {type(last_error).__name__}: {last_error})."
+        )
+    elif empty_graph_attempts > 0:
+        print(
+            f"❌ Map matching indisponível para ponto lat={lat:.6f}, lon={lon:.6f}: "
+            f"{empty_graph_attempts} tentativa(s) retornaram grafo vazio."
+        )
+    else:
+        print(
+            f"❌ Map matching indisponível para ponto lat={lat:.6f}, lon={lon:.6f} "
+            f"(sem detalhes adicionais)."
+        )
     
     return None
 
@@ -707,6 +736,7 @@ def process_sumo_csv(
     total_snaps_successful = 0
     total_snaps_rejected = 0
     total_offsets_clipped = 0
+    total_graph_unavailable = 0
     
     for vehicle_id, group in df.groupby('vehicle_id'):
         # Processar somente o vehicle selecionado
@@ -795,6 +825,7 @@ def process_sumo_csv(
                     G_start, start_lat_offset, start_lon_offset, start_lat_orig, start_lon_orig
                 )
             else:
+                total_graph_unavailable += 1
                 start_lat_private = start_lat_offset
                 start_lon_private = start_lon_offset
             
@@ -806,6 +837,7 @@ def process_sumo_csv(
                     G_end, end_lat_offset, end_lon_offset, end_lat_orig, end_lon_orig
                 )
             else:
+                total_graph_unavailable += 1
                 end_lat_private = end_lat_offset
                 end_lon_private = end_lon_offset
         else:
@@ -860,6 +892,7 @@ def process_sumo_csv(
                     if snap_rejected:
                         total_snaps_rejected += 1
                 else:
+                    total_graph_unavailable += 1
                     seg_lat_priv = seg_lat_offset
                     seg_lon_priv = seg_lon_offset
             else:
@@ -1241,6 +1274,7 @@ def process_sumo_csv(
         print(f"   Pontos processados: {total_points_processed:,}")
         print(f"   Snaps tentados: {total_snaps_attempted:,} ({total_snaps_attempted/total_points_processed*100:.1f}%)")
         print(f"   Snaps bem-sucedidos: {total_snaps_successful:,} ({total_snaps_successful/total_points_processed*100:.1f}%)")
+        print(f"   Grafos indisponíveis (fallback offset): {total_graph_unavailable:,}")
         if FORCE_SNAP:
             print(f"   Snaps forçados (>{MAX_SNAP_DISTANCE}m): {total_snaps_rejected:,} ({total_snaps_rejected/total_points_processed*100:.1f}%)")
             print(f"   ✅ TODOS os pontos estão em ruas (FORCE_SNAP=True)")
@@ -1439,6 +1473,9 @@ def process_single_file_all_runs_task(task: tuple) -> tuple:
 
         run_log_capture = io.StringIO()
         heartbeat_stop = threading.Event()
+        run_failed = False
+        run_error = None
+        run_traceback = ""
 
         def run_heartbeat():
             if HEARTBEAT_SECONDS <= 0:
@@ -1458,34 +1495,39 @@ def process_single_file_all_runs_task(task: tuple) -> tuple:
         )
         heartbeat_thread.start()
 
-        with redirect_stdout(run_log_capture):
-            df_trips, trajectories = process_sumo_csv(
-                input_file,
-                consumo_fab,
-                step,
-                max_radius,
-                target_vehicle,
-            )
+        try:
+            with redirect_stdout(run_log_capture), redirect_stderr(run_log_capture):
+                df_trips, trajectories = process_sumo_csv(
+                    input_file,
+                    consumo_fab,
+                    step,
+                    max_radius,
+                    target_vehicle,
+                )
 
-        heartbeat_stop.set()
-        heartbeat_thread.join(timeout=1)
+            if df_trips.empty:
+                df_run = pd.DataFrame(columns=['run_id', 'source_csv', 'trajectory_id'])
+            else:
+                df_run = df_trips.copy()
+                df_run.insert(0, 'run_id', run_id)
+                df_run.insert(1, 'source_csv', source_name)
 
-        if df_trips.empty:
-            df_run = pd.DataFrame(columns=['run_id', 'source_csv', 'trajectory_id'])
-        else:
-            df_run = df_trips.copy()
-            df_run.insert(0, 'run_id', run_id)
-            df_run.insert(1, 'source_csv', source_name)
+            for t in trajectories:
+                t['run_id'] = run_id
+                t['source_csv'] = source_name
 
-        for t in trajectories:
-            t['run_id'] = run_id
-            t['source_csv'] = source_name
+            attach_trajectory_ids(df_run, trajectories, source_name, run_id)
 
-        attach_trajectory_ids(df_run, trajectories, source_name, run_id)
-
-        run_csv = os.path.join(file_output_dir, f"run_{run_id:03d}.csv")
-        with redirect_stdout(run_log_capture):
-            save_to_csv(df_run, run_csv)
+            run_csv = os.path.join(file_output_dir, f"run_{run_id:03d}.csv")
+            with redirect_stdout(run_log_capture), redirect_stderr(run_log_capture):
+                save_to_csv(df_run, run_csv)
+        except Exception as e:
+            run_failed = True
+            run_error = str(e)
+            run_traceback = traceback.format_exc()
+        finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=1)
 
         run_log = run_log_capture.getvalue().strip()
         if run_log:
@@ -1497,6 +1539,24 @@ def process_single_file_all_runs_task(task: tuple) -> tuple:
                     f"[{worker_name}] [{base_name}] ===== LOG RUN {run_id:03d} FIM =====\n"
                 ),
             )
+
+        if run_failed:
+            append_log_file(
+                worker_log_path,
+                (
+                    f"[{worker_name}] [{base_name}] ❌ ERRO RUN {run_id:03d}/{num_runs:03d}: {run_error}\n"
+                    f"[{worker_name}] [{base_name}] TRACEBACK INICIO\n"
+                    f"{run_traceback}"
+                    f"[{worker_name}] [{base_name}] TRACEBACK FIM\n"
+                ),
+            )
+            thread_safe_print(
+                f"[{worker_name}] [{base_name}] ❌ run {run_id:03d}/{num_runs:03d} falhou: {run_error}"
+            )
+            thread_safe_print(
+                f"[{worker_name}] [{base_name}] 🧾 traceback salvo em {worker_log_path}"
+            )
+            continue
 
         thread_safe_print(
             f"[{worker_name}] [{base_name}] ✅ run {run_id:03d}/{num_runs:03d} finalizada "
@@ -1576,11 +1636,16 @@ def run_batch_parallel(
             task = future_to_task[future]
             input_file = task[0]
             base_name = os.path.splitext(os.path.basename(input_file))[0]
+            worker_guess = "worker-desconhecido"
 
             try:
                 _, worker_name, df_file_all, trajectories = future.result()
             except Exception as e:
-                thread_safe_print(f"\n❌ Falha no CSV {base_name}: {e}")
+                trace = traceback.format_exc()
+                thread_safe_print(
+                    f"\n❌ Falha no CSV {base_name} [{worker_guess}]: {e}"
+                )
+                thread_safe_print(trace)
                 completed += 1
                 thread_safe_print(f"⏱️  Progresso de arquivos: {completed}/{total_tasks}")
                 continue
@@ -1617,6 +1682,11 @@ def run_batch_parallel(
 
 def main():
     """Função principal"""
+    if not MAP_MATCHING_AVAILABLE:
+        print("\n❌ Execução abortada: osmnx não está instalado no ambiente Python atual.")
+        print("   Ative o ambiente correto e instale: pip install osmnx")
+        sys.exit(1)
+
     raw_args = sys.argv[1:]
     positional_args = []
     global DEBUG_MAP_MATCHING, HEARTBEAT_SECONDS
