@@ -22,6 +22,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
+from hd_wallet import build_vehicle_private_keys, load_mnemonic_from_file, recover_wallet_indices
 
 try:
 	import osmnx as ox
@@ -566,6 +567,38 @@ def main() -> None:
 	parser.add_argument("--send-onchain", action="store_true", help="Envia melhor resultado para blockchain")
 	parser.add_argument("--deployment-file", default="../deployment_info.json", help="JSON deployment")
 	parser.add_argument("--private-key", default=None, help="Chave privada da conta oracle")
+	parser.add_argument(
+		"--use-hd-wallets",
+		action="store_true",
+		help="Deriva pseudonimos via HD wallet (uma conta por vehicle_id)",
+	)
+	parser.add_argument(
+		"--seed-file",
+		default="seed.txt",
+		help="Arquivo TXT com mnemonic BIP-39 para derivacao HD",
+	)
+	parser.add_argument(
+		"--hd-account-path-template",
+		default="m/44'/60'/0'/0/{index}",
+		help="Template do caminho HD (use {index} para indice por veiculo)",
+	)
+	parser.add_argument(
+		"--start-index",
+		type=int,
+		default=None,
+		help="Indice inicial HD para derivacao. Se omitido, recupera automaticamente via scan sequencial",
+	)
+	parser.add_argument(
+		"--hd-gap-limit",
+		type=int,
+		default=20,
+		help="Gap limit para recuperacao sequencial de indices HD",
+	)
+	parser.add_argument(
+		"--hd-scan-rpc-url",
+		default=None,
+		help="RPC URL para recuperacao de indices HD (padrao: usa rpc_url do deployment)",
+	)
 	parser.add_argument("--method-name", default="registerOracleResult", help="Metodo do contrato")
 	parser.add_argument(
 		"--method-arg",
@@ -619,12 +652,50 @@ def main() -> None:
 	progress_print(f"Resumo CSV: {summary_csv}")
 
 	if args.send_onchain:
-		if not args.private_key:
-			raise ValueError("--private-key e obrigatorio quando --send-onchain for usado")
+		if not args.private_key and not args.use_hd_wallets:
+			raise ValueError("Use --private-key ou --use-hd-wallets quando --send-onchain for usado")
 		if not args.method_arg:
 			raise ValueError("--method-arg e obrigatorio quando --send-onchain for usado")
 
 		from blockchain_sender import send_oracle_results
+
+		private_keys_by_vehicle = None
+		if args.use_hd_wallets:
+			mnemonic = load_mnemonic_from_file(args.seed_file)
+
+			if args.start_index is not None:
+				start_index = int(args.start_index)
+				if start_index < 0:
+					raise ValueError("--start-index deve ser >= 0")
+				progress_print(f"Usando start_index informado: {start_index}")
+			else:
+				rpc_url_for_scan = args.hd_scan_rpc_url
+				if not rpc_url_for_scan:
+					with open(args.deployment_file, "r", encoding="utf-8") as f:
+						deployment_data = json.load(f)
+					rpc_url_for_scan = deployment_data.get("rpc_url", "http://localhost:8545")
+
+				last_used_index = recover_wallet_indices(
+					mnemonic=mnemonic,
+					web3_provider=rpc_url_for_scan,
+					gap_limit=args.hd_gap_limit,
+				)
+				start_index = last_used_index + 1
+				progress_print(
+					f"Indice HD recuperado via scan: ultimo={last_used_index} | proximo_start_index={start_index}"
+				)
+
+			vehicle_ids = [str(r["vehicle_id"]) for r in results]
+			private_keys_by_vehicle, addresses_by_vehicle = build_vehicle_private_keys(
+				vehicle_ids=vehicle_ids,
+				mnemonic=mnemonic,
+				account_path_template=args.hd_account_path_template,
+				start_index=start_index,
+			)
+			progress_print(
+				f"HD wallets derivados para {len(addresses_by_vehicle)} veiculos via {args.seed_file} "
+				f"(template={args.hd_account_path_template}, start_index={start_index})"
+			)
 
 		txs = send_oracle_results(
 			results=results,
@@ -632,6 +703,7 @@ def main() -> None:
 			private_key=args.private_key,
 			method_name=args.method_name,
 			method_args_spec=args.method_arg,
+			private_keys_by_vehicle=private_keys_by_vehicle,
 		)
 		progress_print(f"Transacoes enviadas: {len(txs)}")
 
