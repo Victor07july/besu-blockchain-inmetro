@@ -15,6 +15,7 @@ Resumo do que ele faz:
 8. Gera hash SHA-256 auditavel da trajetoria original.
 9. Salva JSON/CSV de resultados.
 10. Opcionalmente envia para blockchain com modulo separado.
+11. Opcionalmente deriva pseudonimos com HD wallet (uma conta por veiculo).
 
 ## Fluxo de decisao por limite de erro
 
@@ -46,6 +47,9 @@ Opcionais para map matching:
 Para envio on-chain:
 - `web3`
 - `eth-account`
+
+Para HD wallet/pseudonimos:
+- `eth-account` com suporte a recursos HD wallet (`Account.enable_unaudited_hdwallet_features()`).
 
 ## Uso rapido
 
@@ -102,6 +106,21 @@ python3 oraculo.py \
 	--seed 42
 ```
 
+Com HD wallets (pseudonimos) via arquivo `seed.txt`:
+
+```bash
+python3 oraculo.py \
+	../../implementacao_sumo3_multi/data/vehicles_step_sim_1.csv \
+	--target-privacy-percent 15 \
+	--send-onchain \
+	--use-hd-wallets \
+	--seed-file seed.txt \
+	--method-name registerOracleResult \
+	--method-arg $.vehicle_id \
+	--method-arg $.audit.original_hash_sha256 \
+	--method-arg $.trajectory.private_json
+```
+
 ## Argumentos CLI
 
 Obrigatorio:
@@ -127,7 +146,10 @@ Saida:
 Blockchain (opcional):
 - `--send-onchain`: habilita envio para contrato.
 - `--deployment-file` (default: `../deployment_info.json`): arquivo com endereco/ABI.
-- `--private-key`: chave privada para assinar transacoes.
+- `--private-key`: chave privada unica para assinar transacoes (modo tradicional).
+- `--use-hd-wallets`: habilita derivacao HD por veiculo (pseudonimos).
+- `--seed-file` (default: `seed.txt`): arquivo TXT com mnemonic BIP-39.
+- `--hd-account-path-template` (default: `m/44'/60'/0'/0/{index}`): template de derivacao HD; `{index}` e preenchido por veiculo.
 - `--method-name` (default: `registerOracleResult`): metodo do contrato.
 - `--method-arg`: argumento do metodo (literal ou caminho JSON no formato `$.campo.subcampo`).
 
@@ -211,8 +233,22 @@ python3 oraculo.py \
 ```
 
 Regras:
-- `--private-key` e obrigatorio quando `--send-onchain` estiver ativo.
+- Com `--send-onchain`, use `--private-key` (modo tradicional) OU `--use-hd-wallets` (modo pseudonimo por veiculo).
 - `--method-arg` precisa ser informado ao menos uma vez quando `--send-onchain` estiver ativo.
+
+### Envio com HD wallets (pseudonimos)
+
+No modo HD wallet:
+1. O oracle le o mnemonic do arquivo informado em `--seed-file`.
+2. Valida o mnemonic BIP-39 (palavras + checksum).
+3. Ordena os `vehicle_id` e deriva uma conta por veiculo usando `--hd-account-path-template`.
+4. Assina cada transacao com a chave derivada do respectivo veiculo.
+
+Arquivo de seed padrao:
+- `contracts/privacy/implementacao_offset/scripts/seed.txt`
+
+Observacao importante:
+- O `seed.txt` criado no repositorio e apenas para teste. Substitua por sua seed real antes de rodar.
 
 ## Mensagens de erro comuns
 
@@ -228,9 +264,16 @@ Regras:
 - Cancelamento por limite de erro-alvo
 	- Ocorre quando usuario responde nao na confirmacao interativa.
 
+- `Mnemonic invalido. Verifique palavras e checksum BIP-39.`
+	- O arquivo informado em `--seed-file` nao contem seed valida.
+
+- `Use --private-key ou --use-hd-wallets quando --send-onchain for usado`
+	- Escolha um dos modos de assinatura para envio on-chain.
+
 ## Boas praticas
 
 - Comece com `--attempts` entre 100 e 300 para equilibrio entre qualidade e tempo.
 - Use `--seed` em experimentos comparativos para reproducibilidade.
 - Ajuste `--max-target-error-percent` conforme rigor exigido (menor valor = criterio mais estrito).
 - Mantenha os arquivos de saida e o hash de auditoria para rastreabilidade.
+- Nao versione seed real em Git. Prefira arquivo fora do repositorio, com permissao restrita (ex.: `chmod 600`).

@@ -7,7 +7,7 @@ sao definidos em runtime via CLI (no oraculo) para desacoplar da ABI final.
 """
 
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from eth_account import Account
 from web3 import Web3
@@ -55,9 +55,10 @@ def get_web3(rpc_url: str) -> Web3:
 def send_oracle_results(
     results: List[Dict[str, Any]],
     deployment_file: str,
-    private_key: str,
+    private_key: Optional[str],
     method_name: str,
     method_args_spec: List[str],
+    private_keys_by_vehicle: Optional[Dict[str, str]] = None,
     gas_limit: int = DEFAULT_GAS_LIMIT,
 ) -> List[str]:
     deployment = load_deployment_info(deployment_file)
@@ -72,20 +73,38 @@ def send_oracle_results(
     if not w3.is_connected():
         raise ConnectionError(f"Nao foi possivel conectar ao RPC: {rpc_url}")
 
-    account = Account.from_key(private_key)
     contract = w3.eth.contract(address=contract_address, abi=abi)
+    nonce_by_address: Dict[str, int] = {}
+
+    if not private_key and not private_keys_by_vehicle:
+        raise ValueError("Informe private_key ou private_keys_by_vehicle para envio on-chain")
 
     tx_hashes: List[str] = []
 
     for result in results:
         fn_args = resolve_method_args(result, method_args_spec)
 
+        vehicle_id = str(result.get("vehicle_id", ""))
+        key_for_tx = private_key
+        if private_keys_by_vehicle is not None:
+            if vehicle_id not in private_keys_by_vehicle:
+                raise KeyError(f"Chave privada nao encontrada para vehicle_id={vehicle_id}")
+            key_for_tx = private_keys_by_vehicle[vehicle_id]
+        if not key_for_tx:
+            raise ValueError(f"Chave privada vazia para vehicle_id={vehicle_id}")
+
+        account = Account.from_key(key_for_tx)
+        from_addr = account.address
+
         if not hasattr(contract.functions, method_name):
             raise AttributeError(f"Metodo {method_name} nao encontrado no contrato")
 
-        nonce = w3.eth.get_transaction_count(account.address)
+        if from_addr not in nonce_by_address:
+            nonce_by_address[from_addr] = w3.eth.get_transaction_count(from_addr)
+        nonce = nonce_by_address[from_addr]
+
         tx_payload = {
-            "from": account.address,
+            "from": from_addr,
             "nonce": nonce,
             "gas": gas_limit,
             "gasPrice": w3.to_wei(gas_price_gwei, "gwei"),
@@ -94,7 +113,7 @@ def send_oracle_results(
             tx_payload["chainId"] = int(chain_id)
 
         txn = getattr(contract.functions, method_name)(*fn_args).build_transaction(tx_payload)
-        signed = w3.eth.account.sign_transaction(txn, private_key)
+        signed = w3.eth.account.sign_transaction(txn, key_for_tx)
         tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
         receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
 
@@ -102,5 +121,6 @@ def send_oracle_results(
             raise RuntimeError(f"Transacao revertida para vehicle_id={result.get('vehicle_id')}")
 
         tx_hashes.append(tx_hash.hex())
+        nonce_by_address[from_addr] += 1
 
     return tx_hashes
