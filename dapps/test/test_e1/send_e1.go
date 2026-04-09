@@ -30,12 +30,12 @@ import (
 // ======================================================================
 
 const (
-	RPCURL         = "https://ec2-18-191-167-241.us-east-2.compute.amazonaws.com/user/"
+	RPCURL         = "https://ec2-18-117-120-52.us-east-2.compute.amazonaws.com/user/"
 	DeploymentJSON = "./e1_deployment.json"
 	WalletsJSON    = "./wallets_64_groups.json"
 	DataCSV        = "./dados_gas.csv"
-	NumWorkers     = 4   // Número de workers paralelos
-	TotalRows      = 1000 // Total de linhas a processar (cicla o CSV se necessário)
+	NumWorkers     = 1024 // Número de workers paralelos
+	TotalRows      = 100  // Total de linhas a processar (cicla o CSV se necessário)
 	TxTimeout      = 120 * time.Second
 )
 

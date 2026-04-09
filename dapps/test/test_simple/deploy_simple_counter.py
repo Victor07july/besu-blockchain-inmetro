@@ -21,7 +21,7 @@ RPC_URL = "https://ec2-18-191-167-241.us-east-2.compute.amazonaws.com/user/"
 PRIVATE_KEY = "0x8f2a55949038a9610f50fb23b5883af3b4ecb3c3bb792cbcefbd1542c692be63"
 
 # Caminho do contrato
-CONTRACT_FILE = Path(__file__).parent / "contracts" / "SimpleCounter.sol"
+CONTRACT_FILE = Path(__file__).parent / "SimpleCounter.sol"
 OUTPUT_FILE = Path(__file__).parent / "simple_counter_deployment.json"
 
 # ====================================================================

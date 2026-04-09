@@ -22,7 +22,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
-from hd_wallet import build_vehicle_private_keys, load_mnemonic_from_file, recover_wallet_indices
+from hd_wallet import build_vehicle_private_keys, load_mnemonic_from_file
 
 try:
 	import osmnx as ox
@@ -582,23 +582,6 @@ def main() -> None:
 		default="m/44'/60'/0'/0/{index}",
 		help="Template do caminho HD (use {index} para indice por veiculo)",
 	)
-	parser.add_argument(
-		"--start-index",
-		type=int,
-		default=None,
-		help="Indice inicial HD para derivacao. Se omitido, recupera automaticamente via scan sequencial",
-	)
-	parser.add_argument(
-		"--hd-gap-limit",
-		type=int,
-		default=20,
-		help="Gap limit para recuperacao sequencial de indices HD",
-	)
-	parser.add_argument(
-		"--hd-scan-rpc-url",
-		default=None,
-		help="RPC URL para recuperacao de indices HD (padrao: usa rpc_url do deployment)",
-	)
 	parser.add_argument("--method-name", default="registerOracleResult", help="Metodo do contrato")
 	parser.add_argument(
 		"--method-arg",
@@ -663,38 +646,23 @@ def main() -> None:
 		if args.use_hd_wallets:
 			mnemonic = load_mnemonic_from_file(args.seed_file)
 
-			if args.start_index is not None:
-				start_index = int(args.start_index)
-				if start_index < 0:
-					raise ValueError("--start-index deve ser >= 0")
-				progress_print(f"Usando start_index informado: {start_index}")
-			else:
-				rpc_url_for_scan = args.hd_scan_rpc_url
-				if not rpc_url_for_scan:
-					with open(args.deployment_file, "r", encoding="utf-8") as f:
-						deployment_data = json.load(f)
-					rpc_url_for_scan = deployment_data.get("rpc_url", "http://localhost:8545")
-
-				last_used_index = recover_wallet_indices(
-					mnemonic=mnemonic,
-					web3_provider=rpc_url_for_scan,
-					gap_limit=args.hd_gap_limit,
-				)
-				start_index = last_used_index + 1
-				progress_print(
-					f"Indice HD recuperado via scan: ultimo={last_used_index} | proximo_start_index={start_index}"
-				)
+			indices_by_vehicle: Dict[str, int] = {}
+			for r in results:
+				vehicle_id = str(r["vehicle_id"])
+				audit_hash = str(r["audit"]["original_hash_sha256"])
+				idx = int(audit_hash[:8], 16)
+				indices_by_vehicle[vehicle_id] = idx
 
 			vehicle_ids = [str(r["vehicle_id"]) for r in results]
 			private_keys_by_vehicle, addresses_by_vehicle = build_vehicle_private_keys(
 				vehicle_ids=vehicle_ids,
 				mnemonic=mnemonic,
+				vehicle_indices=indices_by_vehicle,
 				account_path_template=args.hd_account_path_template,
-				start_index=start_index,
 			)
 			progress_print(
 				f"HD wallets derivados para {len(addresses_by_vehicle)} veiculos via {args.seed_file} "
-				f"(template={args.hd_account_path_template}, start_index={start_index})"
+				f"(template={args.hd_account_path_template}, indice=hash[audit_hash[:8]])"
 			)
 
 		txs = send_oracle_results(

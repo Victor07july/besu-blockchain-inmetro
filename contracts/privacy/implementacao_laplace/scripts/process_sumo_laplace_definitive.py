@@ -48,7 +48,7 @@ EMISSAO_GASOLINA = 2.31
 CARBON_PRICE = 50.0
 
 # Privacidade diferencial
-EPSILON = 5.0
+EPSILON = 0.5
 SENSITIVITY = 0.0001  # graus (≈22m de deslocamento médio - próximo do original)
 
 # Map matching

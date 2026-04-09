@@ -31,10 +31,10 @@ import (
 
 const (
 	RPCURL         = "https://ec2-18-191-167-241.us-east-2.compute.amazonaws.com/user/"
-	DeploymentJSON = "../simple_counter_deployment.json"
+	DeploymentJSON = "./simple_counter_deployment.json"
 	WalletsJSON    = "./wallets_64_groups.json"
 	DataCSV        = "./dados_gas.csv"
-	NumWorkers     = 1024 // Comece com 2 para teste rápido
+	NumWorkers     = 2 // Comece com 2 para teste rápido
 	MaxRowsToRead  = 100  // Teste rápido com 100 transações
 	TxTimeout      = 120 * time.Second
 )

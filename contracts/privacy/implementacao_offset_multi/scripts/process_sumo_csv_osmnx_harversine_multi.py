@@ -70,7 +70,7 @@ ENABLE_MAP_MATCHING = True   # True: Aplicar snap to road | False: Apenas offset
 SEARCH_RADIUS = 1500         # Raio de busca da malha viária (metros)
 MAX_SNAP_DISTANCE = 100      # Distância máxima preferida para snap (metros)
 MAX_MAP_MATCHING_ATTEMPTS = 20  # Máximo de tentativas de re-snap para ponto duplicado
-FORCE_UNIQUE_POINTS = True  # False: mantém duplicados | True: tenta re-snap para ponto único
+FORCE_UNIQUE_POINTS = False  # False: mantém duplicados | True: tenta re-snap para ponto único
 CANCEL_OFFSET_DISCARD_RATIO = 1.1  # Cancela offset se >=50% dos pontos forem descartados
 FORCE_SNAP = True            # Forçar snap mesmo se dist > MAX_SNAP_DISTANCE (evita mar)
 GRAPH_CACHE = {}             # Cache de grafos baixados
