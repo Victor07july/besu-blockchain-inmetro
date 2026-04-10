@@ -34,8 +34,8 @@ const (
 	DeploymentJSON = "./e2_deployment.json"
 	WalletsJSON    = "./wallets_64_groups.json"
 	DataCSV        = "./dados_gas.csv"
-	NumWorkers     = 8192 // Número de workers paralelosz
-	TotalRows      = 100  // Total de linhas a processar (cicla o CSV se necessário)
+	NumWorkers     = 512 // Número de workers paralelosz
+	TotalRows      = 100 // Total de linhas a processar (cicla o CSV se necessário)
 	TxTimeout      = 120 * time.Second
 )
 
