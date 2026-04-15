@@ -11,9 +11,11 @@ Endpoints:
 import argparse
 import hashlib
 import json
+import logging
 import math
 import os
 import random
+import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -65,7 +67,7 @@ class ProcessarTrajetoRequest(BaseModel):
     top_k: int = DEFAULT_TOP_K
     max_radius_km: float = 2.0
     enable_map_matching: bool = False
-    search_radius_m: int = 1500
+    search_radius_m: int = 3000
     contract_params: Optional[ContractParamsInput] = None
 
 
@@ -75,6 +77,8 @@ class ConfirmarOpcaoRequest(BaseModel):
 
 
 app = FastAPI(title="Oracle Offset API", version="1.0.0")
+
+logger = logging.getLogger("uvicorn.error")
 
 # Pendencias em memoria: request_id -> dados da proposta
 PENDING_SELECTIONS: Dict[str, Dict[str, Any]] = {}
@@ -254,20 +258,34 @@ def derive_private_real_co2(original_real_co2: int, private_km: float, original_
 
 
 def capped_private_value(original_value: int, private_diff_abs_percent: float, private_raw_value: int) -> int:
-    base = int(original_value * 0.9)
-    bonus_ratio = min(max(private_diff_abs_percent, 0.0), 10.0) / 10.0
-    bonus = int(original_value * 0.1 * bonus_ratio)
-    cap_rule = min(original_value, base + bonus)
+    # Novo criterio:
+    # 1) teto maximo do ofuscado = 90% do original
+    # 2) quanto maior a diferenca de trajeto, maior a penalizacao
+    # 3) sem saturacao em 10%
+    base_cap = original_value * 0.9
+    distance_penalty_ratio = max(0.0, 1.0 - (private_diff_abs_percent / 100.0))
+    cap_rule = int(base_cap * distance_penalty_ratio)
     return max(0, min(private_raw_value, cap_rule))
 
 
 @app.get("/health")
 def health() -> Dict[str, Any]:
-    return {"status": "ok", "pending_requests": len(PENDING_SELECTIONS)}
+    pending = len(PENDING_SELECTIONS)
+    logger.info("[oraculo] healthcheck pending_requests=%s", pending)
+    return {"status": "ok", "pending_requests": pending}
 
 
 @app.post("/processar_trajeto")
 def processar_trajeto(req: ProcessarTrajetoRequest) -> Dict[str, Any]:
+    started_at = time.perf_counter()
+    logger.info(
+        "[oraculo] inicio /processar_trajeto vehicle=%s attempts=%s top_k=%s map_matching_enabled=%s",
+        req.vehicle_id,
+        req.attempts,
+        req.top_k,
+        req.enable_map_matching,
+    )
+
     if req.attempts <= 0:
         raise HTTPException(status_code=400, detail="attempts deve ser > 0")
     if req.top_k <= 0:
@@ -343,6 +361,16 @@ def processar_trajeto(req: ProcessarTrajetoRequest) -> Dict[str, Any]:
             }
         )
 
+        if i == 1 or i == req.attempts or i % 5 == 0:
+            logger.info(
+                "[oraculo] progresso vehicle=%s tentativa=%s/%s diff_abs=%.6f private_km=%.6f",
+                req.vehicle_id,
+                i,
+                req.attempts,
+                abs_diff_percent,
+                private_km,
+            )
+
     top_k = min(req.top_k, len(tries))
     best_options = sorted(tries, key=lambda x: x["distance"]["abs_diff_percent"])[:top_k]
 
@@ -356,6 +384,17 @@ def processar_trajeto(req: ProcessarTrajetoRequest) -> Dict[str, Any]:
         "original_e1_micro": int(original_value),
         "options": best_options,
     }
+
+    elapsed = time.perf_counter() - started_at
+    logger.info(
+        "[oraculo] fim /processar_trajeto request_id=%s vehicle=%s attempts=%s map_matching_enabled=%s map_matching_available=%s elapsed=%.3fs",
+        request_id,
+        req.vehicle_id,
+        req.attempts,
+        req.enable_map_matching,
+        MAP_MATCHING_AVAILABLE,
+        elapsed,
+    )
 
     return {
         "request_id": request_id,
@@ -376,11 +415,22 @@ def processar_trajeto(req: ProcessarTrajetoRequest) -> Dict[str, Any]:
             }
             for idx, opt in enumerate(best_options, start=1)
         ],
+        "diagnostico": {
+            "map_matching_enabled": req.enable_map_matching,
+            "map_matching_available": MAP_MATCHING_AVAILABLE,
+            "processing_seconds": round(elapsed, 6),
+        },
     }
 
 
 @app.post("/confirmar_opcao")
 def confirmar_opcao(req: ConfirmarOpcaoRequest) -> Dict[str, Any]:
+    logger.info(
+        "[oraculo] inicio /confirmar_opcao request_id=%s option_index=%s",
+        req.request_id,
+        req.option_index,
+    )
+
     if req.request_id not in PENDING_SELECTIONS:
         raise HTTPException(status_code=404, detail="request_id nao encontrado")
 
@@ -425,6 +475,13 @@ def confirmar_opcao(req: ConfirmarOpcaoRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"Erro ao enviar transacao: {exc}") from exc
 
     PENDING_SELECTIONS.pop(req.request_id, None)
+
+    logger.info(
+        "[oraculo] fim /confirmar_opcao request_id=%s option_index=%s monetizacao_micro=%s",
+        req.request_id,
+        req.option_index,
+        final_micro,
+    )
 
     return {
         "status": "confirmado",

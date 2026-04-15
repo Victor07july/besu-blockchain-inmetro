@@ -1,0 +1,70 @@
+@startuml
+left to right direction
+skinparam monochrome true
+skinparam shadowing false
+skinparam defaultFontName Arial
+
+[*] --> Coleta
+state "Coleta de Telemetria Bruta" as Coleta
+
+state "Deseja aplicar Offset?" as DecOffset <<choice>>
+Coleta --> DecOffset
+
+state "Manter Trajetória Original" as SemOffset
+DecOffset --> SemOffset : Não
+
+package "Oráculo" {
+  state "Buscar Candidato de Deslocamento" as Buscar
+  state "Projetar na Malha Viária" as Projetar
+  state "Validar Monetização < 100%" as Validar
+  state "Busca concluída?" as DecBusca <<choice>>
+  state "Iterar (n vezes)" as Iterar
+  state "Apresentar 5 Melhores Opções" as Top5
+  state "Usuário Seleciona Opção" as Escolha
+
+  Buscar --> Projetar
+  Projetar --> Validar
+  Validar --> DecBusca
+  DecBusca --> Iterar : Não
+  Iterar --> Buscar
+  DecBusca --> Top5 : Sim
+  Top5 --> Escolha
+}
+
+DecOffset --> Buscar : Sim
+
+state "Definir Estratégia de Identidade" as PonteIdentidade
+SemOffset --> PonteIdentidade
+Escolha --> PonteIdentidade
+
+state "Deseja usar Pseudônimo?" as DecPseudo <<choice>>
+PonteIdentidade --> DecPseudo
+
+state "Gerar Pseudônimo" as GerarPseudo
+state "Vincular Trajeto ao Pseudônimo" as VincPseudo
+state "Submissão via Cenário 3" as Cen3
+
+DecPseudo --> GerarPseudo : Sim
+GerarPseudo --> VincPseudo
+VincPseudo --> Cen3
+
+state "Deseja Anonimato de Trajeto?" as DecAnon <<choice>>
+DecPseudo --> DecAnon : Não
+
+state "Vincular Trajeto ao Hash" as VincHash
+state "Submissão via Cenário 2" as Cen2
+DecAnon --> VincHash : Sim
+VincHash --> Cen2
+
+state "Vincular à Identidade Real" as VincReal
+state "Submissão via Cenário 1" as Cen1
+DecAnon --> VincReal : Não
+VincReal --> Cen1
+
+state "Registro na Blockchain" as Registro
+Cen1 --> Registro
+Cen2 --> Registro
+Cen3 --> Registro
+
+Registro --> [*]
+@enduml

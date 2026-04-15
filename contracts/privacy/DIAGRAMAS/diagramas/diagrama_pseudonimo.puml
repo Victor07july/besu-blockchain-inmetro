@@ -1,0 +1,54 @@
+@startuml
+skinparam monochrome true
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam participantPadding 20
+skinparam boxPadding 10
+
+box "Dispositivo do Cliente" #f0f0f0
+actor Usuario as "Usuário"
+participant Script as "Módulo de Carteira"
+database SeedFile as "Arquivo de Semente\n(Mnemônico)"
+end box
+
+Usuario -> Script: Solicitar Geração\n(Informa: Caminho do Arquivo, index)
+activate Script
+
+Script -> SeedFile: Ler Mnemônico (12 palavras)
+activate SeedFile
+SeedFile --> Script: Conteúdo Bruto
+deactivate SeedFile
+
+note right of Script
+  **Pré-processamento:**
+  Normalizar espaços e quebras de linha
+end note
+Script -> Script: Processar Texto
+
+note right of Script
+  **Validação BIP-39:**
+  Verificar palavras e checksum do mnemônico
+end note
+Script -> Script: Validar Semente
+
+note right of Script
+  **Construção do Caminho BIP-44:**
+  Template: m/44'/60'/0'/0/{index}
+  Substituir {index} pelo valor informado
+end note
+Script -> Script: Construir Caminho de Derivação
+
+note right of Script
+  **Derivação de Chaves (BIP-32/BIP-44):**
+  m / 44' / 60' / 0' / 0 / **index**
+end note
+Script -> Script: Calcular Chaves
+
+note right of Script
+  **Resultado Local:**
+  Gerar par de chaves
+end note
+Script --> Usuario: Retorna (Endereço Pseudônimo, Chave Privada)
+deactivate Script
+
+@enduml

@@ -2,6 +2,27 @@
 """
 Cliente local do usuario para interagir com o oraculo e com a blockchain.
 
+0xc87509a1c067bbde78beb793e6fa76530b6382a4c0241e5e4a9ec0a0f44dc0d3
+
+python3 usuario.py ../data/trajetos/vehicles_step_sim_1.csv \
+  --oracle-url http://127.0.0.1:5001 \
+  --deployment-file deployment_info.json \
+  --user-private-key 0xc87509a1c067bbde78beb793e6fa76530b6382a4c0241e5e4a9ec0a0f44dc0d3
+
+python3 usuario.py ../data/trajetos/vehicles_step_sim_1.csv \
+	--oracle-url http://127.0.0.1:5001 \
+	--deployment-file deployment_info.json \
+	--user-private-key 0xc87509a1c067bbde78beb793e6fa76530b6382a4c0241e5e4a9ec0a0f44dc0d3 \
+	--pseudonym-seed-file ./seed.txt \
+	--pseudonym-hd-index 0
+
+python3 usuario.py ../data/trajetos/vehicles_step_sim_1.csv \
+  --oracle-url http://127.0.0.1:5001 \
+  --deployment-file deployment_info.json \
+  --user-private-key 0xc87509a1c067bbde78beb793e6fa76530b6382a4c0241e5e4a9ec0a0f44dc0d3 \
+  --enable-map-matching \
+  --search-radius-m 1500
+
 Fluxo:
 1) Le CSV local e detecta colunas automaticamente
 2) Pergunta se deseja aplicar ofuscacao por offset
@@ -10,10 +31,10 @@ Fluxo:
 """
 
 import argparse
-import getpass
 import hashlib
 import json
 import math
+import time
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -22,6 +43,7 @@ from eth_account import Account
 from web3 import Web3
 
 from blockchain_sender import load_deployment_info, send_oracle_results
+from hd_wallet import DEFAULT_ACCOUNT_PATH_TEMPLATE, derive_account_from_mnemonic, load_mnemonic_from_file
 
 
 EARTH_RADIUS_KM = 6371.0
@@ -96,6 +118,15 @@ def get_contract_instance(deployment_file: str):
 		raise ConnectionError(f"Nao foi possivel conectar ao RPC: {rpc_url}")
 	contract = w3.eth.contract(address=deployment["contract_address"], abi=deployment["abi"])
 	return w3, contract
+
+
+def resolve_pseudonym_private_key(seed_file: str, hd_index: int) -> tuple[str, str]:
+	if hd_index < 0:
+		raise ValueError(f"Indice HD invalido (<0): {hd_index}")
+	mnemonic = load_mnemonic_from_file(seed_file)
+	account_path = DEFAULT_ACCOUNT_PATH_TEMPLATE.format(index=hd_index)
+	address, private_key = derive_account_from_mnemonic(mnemonic, account_path)
+	return address, private_key
 
 
 def read_hash_onchain(deployment_file: str, token_id: int) -> str:
@@ -181,9 +212,12 @@ def split_city_highway(total_km: float) -> tuple[float, float]:
 def pick_sum_numeric(group: pd.DataFrame, col_name: Optional[str]) -> Optional[float]:
 	if not col_name or col_name not in group.columns:
 		return None
-	series = pd.to_numeric(group[col_name], errors="coerce")
-	if not series.notna().any():
+	series = pd.to_numeric(group[col_name], errors="coerce").dropna()
+	if series.empty:
 		return None
+	# Se a serie for cumulativa (monotona crescente), usar max; senao usar soma.
+	if bool((series.diff().fillna(0) >= 0).all()):
+		return float(series.max())
 	return float(series.sum())
 
 
@@ -381,7 +415,11 @@ def main() -> None:
 	parser.add_argument("--deployment-file", required=True, help="deployment_info.json")
 	parser.add_argument("--user-private-key", required=True, help="Chave privada da carteira do usuario")
 	parser.add_argument("--pseudonym-private-key", default=None, help="Chave privada da carteira pseudonima")
+	parser.add_argument("--pseudonym-seed-file", default=None, help="Arquivo local com a seed/mnemonic da carteira pseudonima")
+	parser.add_argument("--pseudonym-hd-index", type=int, default=0, help="Indice HD usado para derivar a carteira pseudonima")
 	parser.add_argument("--attempts", type=int, default=20, help="N tentativas para o oraculo")
+	parser.add_argument("--enable-map-matching", action="store_true", help="Ativa map matching via OSM no oraculo")
+	parser.add_argument("--search-radius-m", type=int, default=1500, help="Raio de busca para map matching no oraculo")
 	parser.add_argument("--audit-token-id", type=int, default=None, help="Executa apenas auditoria de hash para um tokenId")
 	args = parser.parse_args()
 
@@ -402,11 +440,20 @@ def main() -> None:
 
 		wallet_mode = input("Resgatar com carteira Real ou Pseudonimo? (R/P): ").strip().lower()
 		if wallet_mode in ("p", "pseudonimo", "pseudonimo"):
-			chosen_key = args.pseudonym_private_key
-			if not chosen_key:
-				chosen_key = getpass.getpass("Informe a chave privada da carteira pseudonima: ").strip()
-			if not chosen_key:
-				raise ValueError("Chave privada da carteira pseudonima nao informada")
+			if args.pseudonym_seed_file:
+				pseudonym_address, chosen_key = resolve_pseudonym_private_key(
+					seed_file=args.pseudonym_seed_file,
+					hd_index=args.pseudonym_hd_index,
+				)
+				progress_print(
+					f"Carteira pseudonima derivada da seed no indice {args.pseudonym_hd_index}: {pseudonym_address}"
+				)
+			else:
+				chosen_key = args.pseudonym_private_key
+				if not chosen_key:
+					chosen_key = input("Informe a chave privada da carteira pseudonima: ").strip()
+				if not chosen_key:
+					raise ValueError("Chave privada da carteira pseudonima nao informada")
 			pseudonym = input("Informe o pseudonimo para registrar no evento: ").strip() or "anonimo"
 		else:
 			chosen_key = args.user_private_key
@@ -449,19 +496,45 @@ def main() -> None:
 	answer = input("Deseja aplicar ofuscacao por Offset neste trajeto? (S/N): ").strip().lower()
 
 	if answer in ("s", "sim", "y", "yes"):
+		progress_print(
+			"Modo offset: "
+			+ ("map matching OSM ATIVADO" if args.enable_map_matching else "map matching OSM DESATIVADO")
+		)
 		payload = {
 			"trajetoria": data["trajectory"],
 			"hash_trajetoria_original": data["hash"],
 			"vehicle_id": data["vehicle_id"],
 			"attempts": args.attempts,
 			"top_k": 5,
+			"enable_map_matching": args.enable_map_matching,
+			"search_radius_m": args.search_radius_m,
 			"contract_params": data["contract_params"],
 		}
-		resp = requests.post(f"{args.oracle_url}/processar_trajeto", json=payload, timeout=120)
+		progress_print("Consultando oraculo para gerar opcoes...")
+		start_process = time.perf_counter()
+		try:
+			resp = requests.post(
+				f"{args.oracle_url}/processar_trajeto",
+				json=payload,
+				timeout=None,
+			)
+		except requests.exceptions.ReadTimeout as exc:
+			raise RuntimeError("Timeout inesperado em /processar_trajeto") from exc
+		except requests.exceptions.RequestException as exc:
+			raise RuntimeError(f"Erro de comunicacao com o oraculo em /processar_trajeto: {exc}") from exc
+		elapsed_process = time.perf_counter() - start_process
+		progress_print(f"Oraculo respondeu em {elapsed_process:.3f}s")
 		if resp.status_code != 200:
 			raise RuntimeError(f"Erro no oraculo: {resp.status_code} - {resp.text}")
 
 		body = resp.json()
+		diag = body.get("diagnostico", {})
+		if diag:
+			progress_print(
+				f"Diagnostico oraculo: map_matching_enabled={diag.get('map_matching_enabled')} "
+				f"map_matching_available={diag.get('map_matching_available')} "
+				f"processing_seconds={diag.get('processing_seconds')}"
+			)
 		progress_print("\nOpcao sem offset (referencia):")
 		progress_print(f"Monetizacao original estimada: {body['original']['e1_reais']:.6f} BRL")
 		progress_print("Valores das opcoes abaixo sao estimativas ate a confirmacao on-chain.")
@@ -477,7 +550,20 @@ def main() -> None:
 			"request_id": body["request_id"],
 			"option_index": selected_idx,
 		}
-		conf = requests.post(f"{args.oracle_url}/confirmar_opcao", json=confirm_payload, timeout=120)
+		progress_print("Confirmando opcao com o oraculo...")
+		start_confirm = time.perf_counter()
+		try:
+			conf = requests.post(
+				f"{args.oracle_url}/confirmar_opcao",
+				json=confirm_payload,
+				timeout=None,
+			)
+		except requests.exceptions.ReadTimeout as exc:
+			raise RuntimeError("Timeout inesperado em /confirmar_opcao") from exc
+		except requests.exceptions.RequestException as exc:
+			raise RuntimeError(f"Erro de comunicacao com o oraculo em /confirmar_opcao: {exc}") from exc
+		elapsed_confirm = time.perf_counter() - start_confirm
+		progress_print(f"Confirmacao recebida em {elapsed_confirm:.3f}s")
 		if conf.status_code != 200:
 			raise RuntimeError(f"Erro ao confirmar: {conf.status_code} - {conf.text}")
 
