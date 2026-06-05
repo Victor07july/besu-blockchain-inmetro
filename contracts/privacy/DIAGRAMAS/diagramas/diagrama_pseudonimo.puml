@@ -5,50 +5,50 @@ skinparam defaultFontName Arial
 skinparam participantPadding 20
 skinparam boxPadding 10
 
-box "Dispositivo do Cliente" #f0f0f0
-actor Usuario as "Usuário"
-participant Script as "Módulo de Carteira"
-database SeedFile as "Arquivo de Semente\n(Mnemônico)"
+box "Client Device" #ffffff
+actor Usuario as "User"
+participant Script as "Wallet Module"
+database SeedFile as "Seed File\n(Mnemonic)"
 end box
 
-Usuario -> Script: Solicitar Geração\n(Informa: Caminho do Arquivo, index)
+Usuario -> Script: Request Key Generation\n(Inputs: File Path, index)
 activate Script
 
-Script -> SeedFile: Ler Mnemônico (12 palavras)
+Script -> SeedFile: Read Mnemonic (12 words)
 activate SeedFile
-SeedFile --> Script: Conteúdo Bruto
+SeedFile --> Script: Raw Content
 deactivate SeedFile
 
 note right of Script
-  **Pré-processamento:**
-  Normalizar espaços e quebras de linha
+  **Pre-processing:**
+  Normalize whitespaces and line breaks
 end note
-Script -> Script: Processar Texto
+Script -> Script: Process Mnemonic Text
 
 note right of Script
-  **Validação BIP-39:**
-  Verificar palavras e checksum do mnemônico
+  **BIP-39 Validation:**
+  Verify words against wordlist and checksum
 end note
-Script -> Script: Validar Semente
+Script -> Script: Validate Seed Mnemonic
 
 note right of Script
-  **Construção do Caminho BIP-44:**
+  **BIP-44 Path Construction:**
   Template: m/44'/60'/0'/0/{index}
-  Substituir {index} pelo valor informado
+  Replace {index} with provided integer
 end note
-Script -> Script: Construir Caminho de Derivação
+Script -> Script: Construct Derivation Path
 
 note right of Script
-  **Derivação de Chaves (BIP-32/BIP-44):**
+  **Key Derivation (BIP-32/BIP-44):**
   m / 44' / 60' / 0' / 0 / **index**
 end note
-Script -> Script: Calcular Chaves
+Script -> Script: Compute Cryptographic Keys
 
 note right of Script
-  **Resultado Local:**
-  Gerar par de chaves
+  **Local Output:**
+  Generate active keypair
 end note
-Script --> Usuario: Retorna (Endereço Pseudônimo, Chave Privada)
+Script --> Usuario: Return (Pseudonymous Address, Private Key)
 deactivate Script
 
 @enduml

@@ -14,7 +14,7 @@ from web3 import Web3
 # CONFIGURACOES
 # ====================================================================
 
-RPC_URL = "https://ec2-18-117-120-52.us-east-2.compute.amazonaws.com/user/"
+RPC_URL = "https://ec2-3-133-99-147.us-east-2.compute.amazonaws.com/user/"
 PRIVATE_KEY = "0x8f2a55949038a9610f50fb23b5883af3b4ecb3c3bb792cbcefbd1542c692be63"
 
 CONTRACTS_DIR = Path(__file__).parent.parent / "contracts"

@@ -74,6 +74,7 @@ class ProcessarTrajetoRequest(BaseModel):
 class ConfirmarOpcaoRequest(BaseModel):
     request_id: str
     option_index: int = Field(..., ge=1)
+    min_value_micro: Optional[int] = None
 
 
 app = FastAPI(title="Oracle Offset API", version="1.0.0")
@@ -82,6 +83,18 @@ logger = logging.getLogger("uvicorn.error")
 
 # Pendencias em memoria: request_id -> dados da proposta
 PENDING_SELECTIONS: Dict[str, Dict[str, Any]] = {}
+
+
+def log_map_matching_status(enabled: bool, radius_m: int) -> None:
+    if enabled:
+        if MAP_MATCHING_AVAILABLE:
+            logger.warning("[oraculo] MAP MATCHING ATIVADO (raio=%sm)", radius_m)
+        else:
+            logger.warning(
+                "[oraculo] MAP MATCHING ATIVADO, mas indisponivel (osmnx/shapely nao instalados)"
+            )
+    else:
+        logger.warning("[oraculo] MAP MATCHING DESATIVADO")
 
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -217,6 +230,26 @@ def simulate_e1_value(contract_params: Dict[str, int]) -> int:
     return int(e1)
 
 
+def compute_meta_diff(contract_params: Dict[str, int]) -> Tuple[int, int]:
+    road_gas = int(contract_params.get("roadGasoline", 0))
+    city_gas = int(contract_params.get("cityGasoline", 0))
+    if road_gas <= 0 or city_gas <= 0:
+        return 0, 0
+
+    highway = int(contract_params.get("highwayDistance", 0))
+    city = int(contract_params.get("cityDistance", 0))
+    real_co2 = int(contract_params.get("realCO2Emissions", 0))
+
+    emissao_gas = 1720 * 10**6
+    p_gas = 100 * 10**6
+
+    parte1 = (highway * emissao_gas * p_gas) // (road_gas * 100 * 10**6)
+    parte2 = (city * emissao_gas * p_gas) // (city_gas * 100 * 10**6)
+    meta = parte1 + parte2
+    diff = meta - real_co2 if meta >= real_co2 else 0
+    return int(meta), int(diff)
+
+
 def split_city_highway(total_km: float) -> Tuple[float, float]:
     return total_km * 0.4, total_km * 0.6
 
@@ -291,6 +324,8 @@ def processar_trajeto(req: ProcessarTrajetoRequest) -> Dict[str, Any]:
     if req.top_k <= 0:
         raise HTTPException(status_code=400, detail="top_k deve ser > 0")
 
+    log_map_matching_status(req.enable_map_matching, req.search_radius_m)
+
     trajectory = [[float(p[0]), float(p[1])] for p in req.trajetoria]
     if len(trajectory) < 2:
         raise HTTPException(status_code=400, detail="trajetoria precisa de ao menos 2 pontos")
@@ -310,6 +345,21 @@ def processar_trajeto(req: ProcessarTrajetoRequest) -> Dict[str, Any]:
     original_km = trajectory_distance_km(trajectory)
     contract_params_original = build_contract_params_from_trajectory(trajectory, req.contract_params)
     original_value = simulate_e1_value(contract_params_original)
+
+    default_real_co2_g = max(original_km * 120.0, 1.0)
+    co2_source = "estimado"
+    if req.contract_params is not None and req.contract_params.realCO2Emissions is not None:
+        co2_source = "cliente"
+    real_co2_g = contract_params_original["realCO2Emissions"] / 1e6
+    meta_micro, diff_micro = compute_meta_diff(contract_params_original)
+    logger.info(
+        "[oraculo] co2_real_g=%.6f fonte=%s co2_estimado_g=%.6f meta_g=%.6f diff_g=%.6f",
+        real_co2_g,
+        co2_source,
+        default_real_co2_g,
+        meta_micro / 1e6,
+        diff_micro / 1e6,
+    )
 
     ref_lat = sum(p[0] for p in trajectory) / len(trajectory)
     tries: List[Dict[str, Any]] = []
@@ -441,6 +491,15 @@ def confirmar_opcao(req: ConfirmarOpcaoRequest) -> Dict[str, Any]:
 
     selected = options[req.option_index - 1]
 
+    min_value_micro = req.min_value_micro
+    if min_value_micro is not None:
+        try:
+            min_value_micro = int(min_value_micro)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="min_value_micro invalido") from exc
+        if min_value_micro < 0:
+            raise HTTPException(status_code=400, detail="min_value_micro invalido")
+
     deployment_file = os.environ.get("ORACLE_DEPLOYMENT_FILE")
     oracle_private_key = os.environ.get("ORACLE_PRIVATE_KEY")
     if not deployment_file or not oracle_private_key:
@@ -452,7 +511,14 @@ def confirmar_opcao(req: ConfirmarOpcaoRequest) -> Dict[str, Any]:
     oracle_address = Account.from_key(oracle_private_key).address
     final_micro = int(selected["monetizacao"]["private_final_e1_micro"])
     if final_micro <= 0:
-        raise HTTPException(status_code=400, detail="Valor final de monetizacao nao pode ser zero")
+        if min_value_micro is not None and min_value_micro > 0:
+            logger.warning(
+                "[oraculo] monetizacao zero; aplicando minimo=%s",
+                min_value_micro,
+            )
+            final_micro = int(min_value_micro)
+        else:
+            raise HTTPException(status_code=400, detail="Valor final de monetizacao nao pode ser zero")
 
     payload = [
         {

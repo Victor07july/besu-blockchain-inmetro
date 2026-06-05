@@ -91,7 +91,7 @@ def create_trip_map(trajectories: list, df: pd.DataFrame = None, output_html: st
     
     # Feature groups para organizar layers
     fg_original = folium.FeatureGroup(name='🔴 Trajeto Original', show=True)
-    fg_private = folium.FeatureGroup(name='🔵 Trajeto com DP', show=True)
+    fg_private = folium.FeatureGroup(name='🔵 Trajeto Deslocado', show=True)
     fg_displacement = folium.FeatureGroup(name='📏 Deslocamento (linhas)', show=True)
     fg_info = folium.FeatureGroup(name='ℹ️  Informações', show=True)
     fg_waypoints = folium.FeatureGroup(name='📍 Pontos Intermediários', show=False)
@@ -202,7 +202,7 @@ def create_trip_map(trajectories: list, df: pd.DataFrame = None, output_html: st
             opacity=0.7,
             popup=folium.Popup(f"""
                 <b>{vin}</b><br>
-                Trajeto com DP (ε=0.5)<br>
+                Trajeto Deslocado (ε=0.5)<br>
                 <b>Pontos:</b> {num_points}<br>
                 <b>Deslocamento médio:</b> {avg_displacement:.1f}m<br>
                 <b>Deslocamento máx:</b> {max_displacement:.1f}m
@@ -218,7 +218,7 @@ def create_trip_map(trajectories: list, df: pd.DataFrame = None, output_html: st
             fillColor='blue',
             fillOpacity=0.9,
             popup=folium.Popup(f"""
-                <b>🔒 INÍCIO (Com DP)</b><br>
+                <b>🔒 INÍCIO (Deslocado)</b><br>
                 <b>VIN:</b> {vin}<br>
                 <b>Modelo:</b> {model}<br>
                 <b>Coords:</b> ({start_priv[0]:.6f}, {start_priv[1]:.6f})<br>
@@ -235,7 +235,7 @@ def create_trip_map(trajectories: list, df: pd.DataFrame = None, output_html: st
             fillColor='cyan',
             fillOpacity=0.9,
             popup=folium.Popup(f"""
-                <b>🔒 FIM (Com DP)</b><br>
+                <b>🔒 FIM (Deslocado)</b><br>
                 <b>VIN:</b> {vin}<br>
                 <b>Modelo:</b> {model}<br>
                 <b>Coords:</b> ({end_priv[0]:.6f}, {end_priv[1]:.6f})<br>
@@ -252,7 +252,7 @@ def create_trip_map(trajectories: list, df: pd.DataFrame = None, output_html: st
                 fill=True,
                 fillColor='blue',
                 fillOpacity=0.4,
-                popup=f"Ponto {i} (Com DP)<br>Desl: {displacements[i]:.1f}m"
+                popup=f"Ponto {i} (Deslocado)<br>Desl: {displacements[i]:.1f}m"
             ).add_to(fg_waypoints)
         
         # ========== LINHAS DE DESLOCAMENTO (VERDE/ROXO) ==========
@@ -334,12 +334,12 @@ def create_trip_map(trajectories: list, df: pd.DataFrame = None, output_html: st
         <p style="margin: 0; font-weight: bold; text-align: center;">📊 LEGENDA</p>
         <hr style="margin: 5px 0;">
         <p style="margin: 5px 0;"><span style="color: red;">━━━━━</span> Trajeto Original (completo)</p>
-        <p style="margin: 5px 0;"><span style="color: blue;">━━━━━</span> Trajeto com DP (completo)</p>
+        <p style="margin: 5px 0;"><span style="color: blue;">━━━━━</span> Trajeto Deslocado (completo)</p>
         <p style="margin: 5px 0;"><span style="color: green;">┈┈┈</span> Linhas de deslocamento</p>
         <hr style="margin: 5px 0;">
         <p style="margin: 5px 0; font-size: 12px;">
             🔴 Início | 🟠 Fim (Original)<br>
-            🔵 Início | 🟦 Fim (Com DP)<br>
+            🔵 Início | 🟦 Fim (Deslocado)<br>
             ⚫ Pontos intermediários (<i>camada opcional</i>)
         </p>
         <hr style="margin: 5px 0;">
@@ -436,7 +436,14 @@ def main():
     # Ler dados JSON com trajetos completos
     print(f"📂 Lendo trajetos de {input_file}...")
     with open(input_file, 'r', encoding='utf-8') as f:
-        trajectories = json.load(f)
+        data = json.load(f)
+    
+    # Converter para lista se for dict (keys são strings)
+    if isinstance(data, dict) and data and isinstance(list(data.values())[0], dict):
+        trajectories = list(data.values())
+    else:
+        trajectories = data if isinstance(data, list) else [data]
+    
     print(f"   {len(trajectories)} viagens encontradas")
     
     # Criar estatísticas gerais
@@ -485,7 +492,7 @@ def main():
     print("   2. Abra cada HTML para ver o trajeto de um veículo específico")
     print("   3. Use o controle de camadas para:")
     print("      - Mostrar/ocultar trajeto original")
-    print("      - Mostrar/ocultar trajeto com DP")
+    print("      - Mostrar/ocultar trajeto deslocado")
     print("      - Mostrar/ocultar linhas de deslocamento")
     print("      - Mostrar/ocultar pontos intermediários")
     print("   4. Clique nos marcadores e linhas para ver detalhes")

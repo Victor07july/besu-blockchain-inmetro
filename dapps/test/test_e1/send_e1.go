@@ -30,13 +30,19 @@ import (
 // ======================================================================
 
 const (
-	RPCURL         = "https://ec2-18-117-120-52.us-east-2.compute.amazonaws.com/user/"
+	RPCURL         = "https://ec2-3-133-99-147.us-east-2.compute.amazonaws.com/user/"
 	DeploymentJSON = "./e1_deployment.json"
 	WalletsJSON    = "./wallets_64_groups.json"
 	DataCSV        = "./dados_gas.csv"
-	NumWorkers     = 2048 // Número de workers paralelos
-	TotalRows      = 100  // Total de linhas a processar (cicla o CSV se necessário)
+	NumWorkers     = 2048
+	TotalRows      = 100
 	TxTimeout      = 120 * time.Second
+
+	// Duração máxima do teste. Após esse tempo:
+	//   - workers param de iniciar novas transações
+	//   - transações já enviadas mas confirmadas após o deadline são descartadas
+	// Use 0 para desativar o limite (comportamento original).
+	TestDuration = 10 * time.Minute
 )
 
 // ======================================================================
@@ -48,18 +54,16 @@ type Wallet struct {
 	PrivateKey string `json:"private_key"`
 }
 
-// CalculationParams espelha exatamente o struct Solidity CalculationParams
-// Todos os valores são inteiros escalados por 1e6 conforme o contrato
 type CalculationParams struct {
-	HighwayDistance   *big.Int // km * 1e6
-	CityDistance      *big.Int // km * 1e6
-	EthanolPercent    *big.Int // % (0-100) * 1e6
-	RoadGasoline      *big.Int // km/L * 1e6
-	RoadEthanol       *big.Int // km/L * 1e6
-	CityGasoline      *big.Int // km/L * 1e6
-	CityEthanol       *big.Int // km/L * 1e6
-	RealCO2Emissions  *big.Int // gramas * 1e6
-	CarbonPricePerTon *big.Int // BRL/tonelada * 1e6
+	HighwayDistance   *big.Int
+	CityDistance      *big.Int
+	EthanolPercent    *big.Int
+	RoadGasoline      *big.Int
+	RoadEthanol       *big.Int
+	CityGasoline      *big.Int
+	CityEthanol       *big.Int
+	RealCO2Emissions  *big.Int
+	CarbonPricePerTon *big.Int
 }
 
 type DeploymentData struct {
@@ -99,20 +103,27 @@ type WorkerStats struct {
 	TotalTxs      int
 	SuccessfulTxs int
 	FailedTxs     int
-	TotalLatency  time.Duration
-	AvgLatency    time.Duration
-	MinLatency    time.Duration
-	MaxLatency    time.Duration
 	StartTime     time.Time
 	EndTime       time.Time
 	Duration      time.Duration
+
+	// Latências apenas de transações bem-sucedidas
+	TotalLatency time.Duration
+	AvgLatency   time.Duration
+	MinLatency   time.Duration
+	MaxLatency   time.Duration
+
+	// Latências apenas de transações com erro
+	TotalErrorLatency time.Duration
+	AvgErrorLatency   time.Duration
+	MinErrorLatency   time.Duration
+	MaxErrorLatency   time.Duration
 }
 
 // ======================================================================
 // FUNÇÕES AUXILIARES
 // ======================================================================
 
-// toInt converte um float64 para *big.Int escalado por 1e6, com clamp mínimo
 func toInt(val float64) *big.Int {
 	if val < 0 {
 		val = 0
@@ -124,23 +135,20 @@ func toInt(val float64) *big.Int {
 }
 
 func prepareCalculationParams(row CSVRow) CalculationParams {
-	// Valores padrão para campos ausentes no CSV
-	// Consumos típicos de veículos flex brasileiros (INMETRO)
 	if row.RoadGasoline == 0 {
-		row.RoadGasoline = 14.0 // km/L rodovia gasolina
+		row.RoadGasoline = 14.0
 	}
 	if row.RoadEthanol == 0 {
-		row.RoadEthanol = 10.0 // km/L rodovia etanol
+		row.RoadEthanol = 10.0
 	}
 	if row.CityGasoline == 0 {
-		row.CityGasoline = 12.0 // km/L cidade gasolina
+		row.CityGasoline = 12.0
 	}
 	if row.CityEthanol == 0 {
-		row.CityEthanol = 8.0 // km/L cidade etanol
+		row.CityEthanol = 8.0
 	}
-	// EthanolPercent NÃO tem default: 0% é válido (carro a gasolina pura)
 	if row.CarbonPricePerTon == 0 {
-		row.CarbonPricePerTon = 500.0 // BRL/ton (preço carbono europeu × câmbio)
+		row.CarbonPricePerTon = 500.0
 	}
 
 	return CalculationParams{
@@ -161,20 +169,12 @@ func loadDeploymentData() (*DeploymentData, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	filePath := filepath.Join(dir, DeploymentJSON)
-	data, err := os.ReadFile(filePath)
+	data, err := os.ReadFile(filepath.Join(dir, DeploymentJSON))
 	if err != nil {
 		return nil, err
 	}
-
 	var deployment DeploymentData
-	err = json.Unmarshal(data, &deployment)
-	if err != nil {
-		return nil, err
-	}
-
-	return &deployment, nil
+	return &deployment, json.Unmarshal(data, &deployment)
 }
 
 func loadWallets(numWallets int) ([]Wallet, error) {
@@ -182,19 +182,14 @@ func loadWallets(numWallets int) ([]Wallet, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	filePath := filepath.Join(dir, WalletsJSON)
-	data, err := os.ReadFile(filePath)
+	data, err := os.ReadFile(filepath.Join(dir, WalletsJSON))
 	if err != nil {
 		return nil, err
 	}
-
 	var walletsMap map[string]Wallet
-	err = json.Unmarshal(data, &walletsMap)
-	if err != nil {
+	if err := json.Unmarshal(data, &walletsMap); err != nil {
 		return nil, err
 	}
-
 	var wallets []Wallet
 	for i := 1; i <= numWallets && i <= len(walletsMap); i++ {
 		key := fmt.Sprintf("vehicle_group_%d", i)
@@ -202,11 +197,9 @@ func loadWallets(numWallets int) ([]Wallet, error) {
 			wallets = append(wallets, w)
 		}
 	}
-
 	if len(wallets) < numWallets {
 		return nil, fmt.Errorf("número insuficiente de wallets: encontrado %d, necessário %d", len(wallets), numWallets)
 	}
-
 	return wallets, nil
 }
 
@@ -218,7 +211,6 @@ func readCSV(filename string) ([]CSVRow, error) {
 	defer file.Close()
 
 	reader := csv.NewReader(file)
-
 	header, err := reader.Read()
 	if err != nil {
 		return nil, err
@@ -235,7 +227,6 @@ func readCSV(filename string) ([]CSVRow, error) {
 		if err != nil {
 			break
 		}
-
 		parseFloat := func(colName string) float64 {
 			if idx, ok := colMap[colName]; ok && idx < len(record) {
 				val, _ := strconv.ParseFloat(strings.TrimSpace(record[idx]), 64)
@@ -243,8 +234,7 @@ func readCSV(filename string) ([]CSVRow, error) {
 			}
 			return 0
 		}
-
-		row := CSVRow{
+		rows = append(rows, CSVRow{
 			HighwayDistance:   parseFloat("highway (distance)"),
 			CityDistance:      parseFloat("city (distance)"),
 			EthanolPercent:    parseFloat("ethanol (%)"),
@@ -253,15 +243,12 @@ func readCSV(filename string) ([]CSVRow, error) {
 			CityGasoline:      parseFloat("city (gasoline)"),
 			CityEthanol:       parseFloat("city (ethanol)"),
 			RealCO2Emissions:  parseFloat("co2_etanol_original_gas_1720_flex"),
-			CarbonPricePerTon: parseFloat("carbon_price_per_ton"), // não existe no CSV → usa default
-		}
-		rows = append(rows, row)
+			CarbonPricePerTon: parseFloat("carbon_price_per_ton"),
+		})
 	}
-
 	return rows, nil
 }
 
-// expandRows cicla o slice base até atingir total linhas
 func expandRows(base []CSVRow, total int) []CSVRow {
 	if len(base) == 0 {
 		return base
@@ -287,13 +274,11 @@ func saveResults(results []Result, filename string) error {
 		"linha", "worker_id", "wallet_addr", "tx_hash", "block", "gas_used",
 		"latency_ms", "error",
 	})
-
 	for _, r := range results {
 		errStr := ""
 		if r.Error != nil {
 			errStr = r.Error.Error()
 		}
-
 		writer.Write([]string{
 			fmt.Sprintf("%d", r.Linha),
 			fmt.Sprintf("%d", r.WorkerID),
@@ -305,7 +290,6 @@ func saveResults(results []Result, filename string) error {
 			errStr,
 		})
 	}
-
 	return nil
 }
 
@@ -321,8 +305,9 @@ func saveWorkerStats(stats []WorkerStats, filename string) error {
 
 	writer.Write([]string{
 		"worker_id", "total_txs", "successful_txs", "failed_txs",
-		"duration_s", "avg_latency_ms", "min_latency_ms", "max_latency_ms",
-		"throughput_tx_s",
+		"duration_s", "throughput_tx_s",
+		"success_avg_latency_ms", "success_min_latency_ms", "success_max_latency_ms",
+		"error_avg_latency_ms", "error_min_latency_ms", "error_max_latency_ms",
 	})
 
 	for _, s := range stats {
@@ -331,19 +316,31 @@ func saveWorkerStats(stats []WorkerStats, filename string) error {
 			throughput = float64(s.SuccessfulTxs) / s.Duration.Seconds()
 		}
 
+		sucAvg, sucMin, sucMax := "-", "-", "-"
+		if s.SuccessfulTxs > 0 {
+			sucAvg = fmt.Sprintf("%.2f", s.AvgLatency.Seconds()*1000)
+			sucMin = fmt.Sprintf("%.2f", s.MinLatency.Seconds()*1000)
+			sucMax = fmt.Sprintf("%.2f", s.MaxLatency.Seconds()*1000)
+		}
+
+		errAvg, errMin, errMax := "-", "-", "-"
+		if s.FailedTxs > 0 {
+			errAvg = fmt.Sprintf("%.2f", s.AvgErrorLatency.Seconds()*1000)
+			errMin = fmt.Sprintf("%.2f", s.MinErrorLatency.Seconds()*1000)
+			errMax = fmt.Sprintf("%.2f", s.MaxErrorLatency.Seconds()*1000)
+		}
+
 		writer.Write([]string{
 			fmt.Sprintf("%d", s.WorkerID),
 			fmt.Sprintf("%d", s.TotalTxs),
 			fmt.Sprintf("%d", s.SuccessfulTxs),
 			fmt.Sprintf("%d", s.FailedTxs),
 			fmt.Sprintf("%.2f", s.Duration.Seconds()),
-			fmt.Sprintf("%.2f", s.AvgLatency.Seconds()*1000),
-			fmt.Sprintf("%.2f", s.MinLatency.Seconds()*1000),
-			fmt.Sprintf("%.2f", s.MaxLatency.Seconds()*1000),
 			fmt.Sprintf("%.2f", throughput),
+			sucAvg, sucMin, sucMax,
+			errAvg, errMin, errMax,
 		})
 	}
-
 	return nil
 }
 
@@ -355,7 +352,6 @@ func waitForReceipt(ctx context.Context, client *ethclient.Client, txHash common
 	defer ticker.Stop()
 
 	attempts := 0
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -377,13 +373,10 @@ func dialWithInsecureTLS(url string) (*ethclient.Client, error) {
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}
-	httpClient := &http.Client{Transport: tr}
-
-	rpcClient, err := rpc.DialHTTPWithClient(url, httpClient)
+	rpcClient, err := rpc.DialHTTPWithClient(url, &http.Client{Transport: tr})
 	if err != nil {
 		return nil, err
 	}
-
 	return ethclient.NewClient(rpcClient), nil
 }
 
@@ -391,6 +384,9 @@ func dialWithInsecureTLS(url string) (*ethclient.Client, error) {
 // WORKER
 // ======================================================================
 
+// worker recebe deadlineCtx: quando ele expira, nenhuma nova transação é iniciada.
+// Transações já em voo continuam até TxTimeout, mas serão filtradas no main
+// caso a confirmação chegue após o deadline.
 func worker(
 	workerID int,
 	wallet Wallet,
@@ -401,10 +397,9 @@ func worker(
 	contractABI abi.ABI,
 	chainID *big.Int,
 	printMutex *sync.Mutex,
+	deadlineCtx context.Context, // cancelado quando TestDuration expirar
 ) {
 	defer wg.Done()
-
-	ctx := context.Background()
 
 	client, err := dialWithInsecureTLS(RPCURL)
 	if err != nil {
@@ -428,8 +423,7 @@ func worker(
 		return
 	}
 
-	publicKey := privateKey.Public()
-	publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
+	publicKeyECDSA, ok := privateKey.Public().(*ecdsa.PublicKey)
 	if !ok {
 		printMutex.Lock()
 		fmt.Printf("[Worker %d] ❌ Erro ao converter chave pública\n", workerID)
@@ -439,7 +433,9 @@ func worker(
 
 	fromAddress := crypto.PubkeyToAddress(*publicKeyECDSA)
 
-	nonce, err := client.PendingNonceAt(ctx, fromAddress)
+	// Usa deadlineCtx para obter o nonce: se o deadline já expirou antes de
+	// começar, o worker encerra limpo.
+	nonce, err := client.PendingNonceAt(deadlineCtx, fromAddress)
 	if err != nil {
 		printMutex.Lock()
 		fmt.Printf("[Worker %d] ❌ Erro ao obter nonce inicial: %v\n", workerID, err)
@@ -452,6 +448,16 @@ func worker(
 	printMutex.Unlock()
 
 	for idx, row := range rows {
+		// ── Verifica o deadline ANTES de iniciar cada nova transação ──────
+		select {
+		case <-deadlineCtx.Done():
+			printMutex.Lock()
+			fmt.Printf("[Worker %d] ⏱️  Tempo esgotado — encerrando após %d transações.\n", workerID, idx)
+			printMutex.Unlock()
+			return
+		default:
+		}
+
 		startTime := time.Now()
 
 		result := Result{
@@ -462,12 +468,8 @@ func worker(
 		}
 
 		params := prepareCalculationParams(row)
-
-		// Blockchain tem zeroBaseFee: true, então gasPrice = 0
 		gasPrice := big.NewInt(0)
 
-		// calculateAndMint(CalculationParams params, address recipient)
-		// O recipient é o próprio sender (cada worker minsta para sua própria carteira)
 		input, err := contractABI.Pack("calculateAndMint", params, fromAddress)
 		if err != nil {
 			result.Error = fmt.Errorf("erro ao empacotar dados: %v", err)
@@ -476,8 +478,7 @@ func worker(
 			continue
 		}
 
-		gasLimit := uint64(500000)
-		tx := types.NewTransaction(nonce, contractAddress, big.NewInt(0), gasLimit, gasPrice, input)
+		tx := types.NewTransaction(nonce, contractAddress, big.NewInt(0), uint64(500000), gasPrice, input)
 
 		signedTx, err := types.SignTx(tx, types.NewEIP155Signer(chainID), privateKey)
 		if err != nil {
@@ -487,7 +488,9 @@ func worker(
 			continue
 		}
 
-		err = client.SendTransaction(ctx, signedTx)
+		// Envia usando deadlineCtx: se o contexto já foi cancelado, SendTransaction
+		// retorna imediatamente com erro, sem enviar à rede.
+		err = client.SendTransaction(deadlineCtx, signedTx)
 		if err != nil {
 			result.Error = err
 			result.Latency = time.Since(startTime)
@@ -495,17 +498,14 @@ func worker(
 			fmt.Printf("[Worker %d] ❌ Erro ao enviar TX %d (nonce %d): %v\n", workerID, idx+1, nonce, err)
 			printMutex.Unlock()
 
-			errStr := err.Error()
-			if strings.Contains(strings.ToLower(errStr), "nonce too low") {
+			if strings.Contains(strings.ToLower(err.Error()), "nonce too low") {
 				nonce++
 			}
-
 			results <- result
 			continue
 		}
 
 		nonce++
-
 		result.TxHash = signedTx.Hash().Hex()
 		result.TxSentTime = time.Now()
 
@@ -513,7 +513,10 @@ func worker(
 		fmt.Printf("[Worker %d] 📤 TX %d enviada: %s - Aguardando confirmação...\n", workerID, idx+1, result.TxHash[:10])
 		printMutex.Unlock()
 
-		receipt, err := waitForReceipt(ctx, client, signedTx.Hash(), TxTimeout)
+		// Para o waitForReceipt usamos context.Background() com TxTimeout próprio,
+		// pois a transação já foi enviada à rede e deve ser aguardada normalmente.
+		// O filtro do deadline é feito no main, após a confirmação.
+		receipt, err := waitForReceipt(context.Background(), client, signedTx.Hash(), TxTimeout)
 		if err != nil {
 			result.Error = err
 			result.Latency = time.Since(startTime)
@@ -558,19 +561,22 @@ func main() {
 	fmt.Println("TESTE DE PERFORMANCE - CARBON CREDIT NFT E1")
 	fmt.Println("=" + strings.Repeat("=", 70))
 
+	if TestDuration > 0 {
+		fmt.Printf("⏱️  Duração máxima do teste: %v\n", TestDuration)
+	} else {
+		fmt.Println("⏱️  Duração máxima: sem limite (processará todas as linhas)")
+	}
+
 	deployment, err := loadDeploymentData()
 	if err != nil {
 		log.Fatalf("❌ Erro ao carregar deployment: %v", err)
 	}
-
 	fmt.Printf("📍 Contrato: %s\n", deployment.ContractAddress)
 
 	var abiJSON []interface{}
-	err = json.Unmarshal(deployment.ABI, &abiJSON)
-	if err != nil {
+	if err := json.Unmarshal(deployment.ABI, &abiJSON); err != nil {
 		log.Fatalf("❌ Erro ao parsear ABI: %v", err)
 	}
-
 	abiBytes, _ := json.Marshal(abiJSON)
 	contractABI, err := abi.JSON(strings.NewReader(string(abiBytes)))
 	if err != nil {
@@ -587,13 +593,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("❌ Erro ao conectar: %v", err)
 	}
-
 	chainID, err := client.ChainID(context.Background())
 	if err != nil {
 		log.Fatalf("❌ Erro ao obter chain ID: %v", err)
 	}
 	fmt.Printf("🔗 Chain ID: %s\n", chainID.String())
-
 	client.Close()
 
 	rawRows, err := readCSV(DataCSV)
@@ -604,10 +608,23 @@ func main() {
 
 	rows := expandRows(rawRows, TotalRows)
 	fmt.Printf("🔄 Linhas expandidas (com ciclo): %d\n", len(rows))
-
 	fmt.Printf("\n🚀 Iniciando %d workers...\n", NumWorkers)
 
-	startTime := time.Now()
+	// ── Deadline global ───────────────────────────────────────────────────
+	testStart := time.Now()
+	var deadline time.Time
+	var deadlineCtx context.Context
+	var cancelDeadline context.CancelFunc
+
+	if TestDuration > 0 {
+		deadlineCtx, cancelDeadline = context.WithTimeout(context.Background(), TestDuration)
+		deadline = testStart.Add(TestDuration)
+	} else {
+		// Sem limite: contexto que nunca expira
+		deadlineCtx, cancelDeadline = context.WithCancel(context.Background())
+	}
+	defer cancelDeadline()
+
 	results := make(chan Result, NumWorkers*len(rows))
 	var wg sync.WaitGroup
 	var printMutex sync.Mutex
@@ -616,17 +633,7 @@ func main() {
 
 	for i := 0; i < NumWorkers; i++ {
 		wg.Add(1)
-		go worker(
-			i+1,
-			wallets[i],
-			rows,
-			results,
-			&wg,
-			contractAddress,
-			contractABI,
-			chainID,
-			&printMutex,
-		)
+		go worker(i+1, wallets[i], rows, results, &wg, contractAddress, contractABI, chainID, &printMutex, deadlineCtx)
 	}
 
 	go func() {
@@ -639,16 +646,43 @@ func main() {
 		allResults = append(allResults, r)
 	}
 
-	totalDuration := time.Since(startTime)
+	totalDuration := time.Since(testStart)
 
-	// Calcular estatísticas por worker
-	workerStatsMap := make(map[int]*WorkerStats)
+	// ── Filtro pelo deadline ───────────────────────────────────────────────
+	// Descarta transações confirmadas APÓS o deadline (ou com erro ocorrido
+	// após o deadline). Transações com erro instantâneo (pack/sign/send)
+	// têm ConfirmedTime zero — essas são mantidas se StartTime <= deadline.
+	var filteredResults []Result
+	discarded := 0
+
 	for _, r := range allResults {
+		if TestDuration > 0 {
+			// Referência de tempo: ConfirmedTime para sucessos, StartTime para erros rápidos
+			ref := r.ConfirmedTime
+			if ref.IsZero() {
+				ref = r.StartTime
+			}
+			if ref.After(deadline) {
+				discarded++
+				continue
+			}
+		}
+		filteredResults = append(filteredResults, r)
+	}
+
+	if TestDuration > 0 && discarded > 0 {
+		fmt.Printf("\n⏱️  %d transação(ões) descartada(s) por confirmação após o deadline.\n", discarded)
+	}
+
+	// ── Acumulação de estatísticas por worker (sobre filteredResults) ──────
+	workerStatsMap := make(map[int]*WorkerStats)
+	for _, r := range filteredResults {
 		if _, ok := workerStatsMap[r.WorkerID]; !ok {
 			workerStatsMap[r.WorkerID] = &WorkerStats{
-				WorkerID:   r.WorkerID,
-				MinLatency: time.Hour * 24,
-				StartTime:  r.StartTime,
+				WorkerID:        r.WorkerID,
+				MinLatency:      24 * time.Hour,
+				MinErrorLatency: 24 * time.Hour,
+				StartTime:       r.StartTime,
 			}
 		}
 
@@ -658,7 +692,6 @@ func main() {
 		if r.Error == nil {
 			stats.SuccessfulTxs++
 			stats.TotalLatency += r.Latency
-
 			if r.Latency < stats.MinLatency {
 				stats.MinLatency = r.Latency
 			}
@@ -667,6 +700,13 @@ func main() {
 			}
 		} else {
 			stats.FailedTxs++
+			stats.TotalErrorLatency += r.Latency
+			if r.Latency < stats.MinErrorLatency {
+				stats.MinErrorLatency = r.Latency
+			}
+			if r.Latency > stats.MaxErrorLatency {
+				stats.MaxErrorLatency = r.Latency
+			}
 		}
 
 		if r.ConfirmedTime.After(stats.EndTime) {
@@ -680,37 +720,58 @@ func main() {
 		if stats.SuccessfulTxs > 0 {
 			stats.AvgLatency = stats.TotalLatency / time.Duration(stats.SuccessfulTxs)
 		}
+		if stats.FailedTxs > 0 {
+			stats.AvgErrorLatency = stats.TotalErrorLatency / time.Duration(stats.FailedTxs)
+		}
 		statsSlice = append(statsSlice, *stats)
 	}
 
 	os.MkdirAll("results", 0755)
-
-	saveResults(allResults, fmt.Sprintf("results/e1_results_%dworkers.csv", NumWorkers))
+	saveResults(filteredResults, fmt.Sprintf("results/e1_results_%dworkers.csv", NumWorkers))
 	saveWorkerStats(statsSlice, fmt.Sprintf("results/e1_stats_%dworkers.csv", NumWorkers))
 
-	// Resumo final
+	// ── Resumo global ─────────────────────────────────────────────────────
 	totalSuccess := 0
 	totalFail := 0
-	var totalLatency time.Duration
-	minLatency := time.Hour * 24
-	maxLatency := time.Duration(0)
+	var totalSuccessLatency time.Duration
+	var totalErrorLatency time.Duration
+	minSuccessLatency := 24 * time.Hour
+	maxSuccessLatency := time.Duration(0)
+	minErrorLatency := 24 * time.Hour
+	maxErrorLatency := time.Duration(0)
 
 	for _, stats := range statsSlice {
 		totalSuccess += stats.SuccessfulTxs
 		totalFail += stats.FailedTxs
-		totalLatency += stats.TotalLatency
+		totalSuccessLatency += stats.TotalLatency
+		totalErrorLatency += stats.TotalErrorLatency
 
-		if stats.MinLatency < minLatency {
-			minLatency = stats.MinLatency
+		if stats.SuccessfulTxs > 0 {
+			if stats.MinLatency < minSuccessLatency {
+				minSuccessLatency = stats.MinLatency
+			}
+			if stats.MaxLatency > maxSuccessLatency {
+				maxSuccessLatency = stats.MaxLatency
+			}
 		}
-		if stats.MaxLatency > maxLatency {
-			maxLatency = stats.MaxLatency
+		if stats.FailedTxs > 0 {
+			if stats.MinErrorLatency < minErrorLatency {
+				minErrorLatency = stats.MinErrorLatency
+			}
+			if stats.MaxErrorLatency > maxErrorLatency {
+				maxErrorLatency = stats.MaxErrorLatency
+			}
 		}
 	}
 
-	avgLatency := time.Duration(0)
+	avgSuccessLatency := time.Duration(0)
 	if totalSuccess > 0 {
-		avgLatency = totalLatency / time.Duration(totalSuccess)
+		avgSuccessLatency = totalSuccessLatency / time.Duration(totalSuccess)
+	}
+
+	avgErrorLatency := time.Duration(0)
+	if totalFail > 0 {
+		avgErrorLatency = totalErrorLatency / time.Duration(totalFail)
 	}
 
 	totalThroughput := float64(totalSuccess) / totalDuration.Seconds()
@@ -719,14 +780,34 @@ func main() {
 	fmt.Println("📊 RESUMO FINAL")
 	fmt.Println(strings.Repeat("=", 70))
 	fmt.Printf("Workers:             %d\n", NumWorkers)
+	if TestDuration > 0 {
+		fmt.Printf("Duração configurada: %v\n", TestDuration)
+	}
 	fmt.Printf("Total transações:    %d\n", totalSuccess+totalFail)
 	fmt.Printf("Bem-sucedidas:       %d\n", totalSuccess)
 	fmt.Printf("Falhas:              %d\n", totalFail)
+	fmt.Printf("Descartadas:         %d\n", discarded)
 	fmt.Printf("Taxa de sucesso:     %.2f%%\n", float64(totalSuccess)/float64(totalSuccess+totalFail)*100)
-	fmt.Printf("\nDuração total:       %.2f segundos (%.2f minutos)\n", totalDuration.Seconds(), totalDuration.Minutes())
-	fmt.Printf("Latência média:      %.2f segundos\n", avgLatency.Seconds())
-	fmt.Printf("Latência mínima:     %.2f segundos\n", minLatency.Seconds())
-	fmt.Printf("Latência máxima:     %.2f segundos\n", maxLatency.Seconds())
-	fmt.Printf("\nThroughput total:    %.3f tx/s\n", totalThroughput)
+	fmt.Printf("\nDuração total:       %.2fs (%.2f min)\n", totalDuration.Seconds(), totalDuration.Minutes())
+	fmt.Printf("Throughput total:    %.3f tx/s\n", totalThroughput)
+
+	fmt.Println("\n── Latência (transações bem-sucedidas) ──")
+	if totalSuccess > 0 {
+		fmt.Printf("  Média:             %.2f s\n", avgSuccessLatency.Seconds())
+		fmt.Printf("  Mínima:            %.2f s\n", minSuccessLatency.Seconds())
+		fmt.Printf("  Máxima:            %.2f s\n", maxSuccessLatency.Seconds())
+	} else {
+		fmt.Println("  Nenhuma transação bem-sucedida.")
+	}
+
+	fmt.Println("\n── Latência (transações com erro) ──")
+	if totalFail > 0 {
+		fmt.Printf("  Média:             %.2f s\n", avgErrorLatency.Seconds())
+		fmt.Printf("  Mínima:            %.2f s\n", minErrorLatency.Seconds())
+		fmt.Printf("  Máxima:            %.2f s\n", maxErrorLatency.Seconds())
+	} else {
+		fmt.Println("  Nenhuma falha registrada.")
+	}
+
 	fmt.Println(strings.Repeat("=", 70))
 }
