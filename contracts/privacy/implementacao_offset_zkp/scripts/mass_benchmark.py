@@ -55,7 +55,7 @@ from usuario import (  # type: ignore
 # === CONFIG (edit as needed) ===
 REPEAT_PER_CSV = 1
 MAX_CSV_FILES: Optional[int] = None
-SCENARIOS = ["oracle", "redeem"]
+SCENARIOS = ["oracle", "redeem_pseu"]
 # Available: direct, pseudonym, direct_pseudonym, oracle, redeem
 
 DATA_DIR = REPO_ROOT / "contracts" / "privacy" / "implementacao_offset_zkp" / "data" / "trajetos_toyota_50"

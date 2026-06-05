@@ -6,7 +6,8 @@ Scenarios:
 - direct: send tx with user key
 - pseudonym/direct_pseudonym: direct send with pseudonym key
 - oracle: offset flow via oracle API
-- redeem: redeem ZK proofs in bulk (requires oracle ZK mints)
+- redeem: redeem ZK proofs using the real user key (requires oracle ZK mints)
+- redeem_pseudonym: redeem ZK proofs using the pseudonym key (requires oracle ZK mints)
 
 Edit REPEAT_PER_CSV to control how many times each CSV is used.
 """
@@ -55,8 +56,8 @@ from usuario import (  # type: ignore
 # === CONFIG (edit as needed) ===
 REPEAT_PER_CSV = 3
 MAX_CSV_FILES: Optional[int] = None
-SCENARIOS = ["direct", "pseudonym", "oracle"]
-# Available: direct, pseudonym, direct_pseudonym, oracle, redeem
+SCENARIOS = ["oracle", "redeem_pseudonym"]
+# Available: direct, pseudonym, direct_pseudonym, oracle, redeem, redeem_pseudonym
 
 DATA_DIR = REPO_ROOT / "contracts" / "privacy" / "implementacao_offset_zkp" / "data" / "trajetos"
 DEPLOYMENT_FILE = Path(
@@ -109,6 +110,7 @@ FIELDNAMES = [
     "oracle_confirm_seconds",
     "zkp_enabled",
     "zk_proof_seconds",
+    "pseudonym_gen_seconds",
     "error",
     "total_sent",
     "success_count",
@@ -575,10 +577,28 @@ def run_scenario(
             if not PSEUDONYM_PRIVATE_KEY and not PSEUDONYM_SEED_FILE:
                 raise ValueError("Provide BENCH_PSEUDONYM_PRIVATE_KEY or BENCH_PSEUDONYM_SEED_FILE")
 
-    if scenario == "redeem":
-        redeem_key = REDEEM_PRIVATE_KEY or USER_PRIVATE_KEY
-        if not redeem_key:
-            raise ValueError("BENCH_REDEEM_PRIVATE_KEY or BENCH_USER_PRIVATE_KEY is required for redeem")
+    if scenario in ("redeem", "redeem_pseudonym"):
+        if scenario == "redeem_pseudonym":
+            # resolve pseudonym key, measuring generation time
+            if PSEUDONYM_PRIVATE_KEY:
+                redeem_key = PSEUDONYM_PRIVATE_KEY
+                redeem_pseudonym_gen_seconds = None
+            elif PSEUDONYM_SEED_FILE:
+                pseudonym_gen_start = time.perf_counter()
+                _, redeem_key = resolve_pseudonym_private_key(
+                    seed_file=PSEUDONYM_SEED_FILE,
+                    hd_index=PSEUDONYM_HD_INDEX,
+                )
+                redeem_pseudonym_gen_seconds = round(time.perf_counter() - pseudonym_gen_start, 6)
+            else:
+                raise ValueError(
+                    "BENCH_PSEUDONYM_PRIVATE_KEY or BENCH_PSEUDONYM_SEED_FILE is required for redeem_pseudonym scenario"
+                )
+        else:
+            redeem_key = REDEEM_PRIVATE_KEY or USER_PRIVATE_KEY
+            redeem_pseudonym_gen_seconds = None
+            if not redeem_key:
+                raise ValueError("BENCH_REDEEM_PRIVATE_KEY or BENCH_USER_PRIVATE_KEY is required for redeem scenario")
 
         items = list(redeem_queue)
         if REDEEM_LIMIT > 0:
@@ -607,7 +627,17 @@ def run_scenario(
                     "repeat_index": item.get("repeat_index", idx),
                 }
                 try:
+                    # for redeem_pseudonym, derive a fresh pseudonym per item
+                    if scenario == "redeem_pseudonym" and PSEUDONYM_SEED_FILE:
+                        current_hd_index = PSEUDONYM_HD_INDEX + (total_sent - 1)
+                        pseudonym_gen_start = time.perf_counter()
+                        _, redeem_key = resolve_pseudonym_private_key(
+                            seed_file=PSEUDONYM_SEED_FILE,
+                            hd_index=current_hd_index,
+                        )
+                        redeem_pseudonym_gen_seconds = round(time.perf_counter() - pseudonym_gen_start, 6)
                     result = redeem_zk_run(item, deployment, w3, contract, nonce_cache, redeem_key)
+                    result["pseudonym_gen_seconds"] = redeem_pseudonym_gen_seconds
                     row.update(result)
                     status = int(result.get("tx_status", 0))
                     if status == 1:
@@ -624,7 +654,8 @@ def run_scenario(
                         "block_number": None, "e1_original_micro": None, "e1_after_micro": None,
                         "e1_original_brl": None, "e1_after_brl": None,
                         "oracle_process_seconds": None, "oracle_confirm_seconds": None,
-                        "zkp_enabled": None, "zk_proof_seconds": None, "error": str(exc),
+                        "zkp_enabled": None, "zk_proof_seconds": None,
+                        "pseudonym_gen_seconds": None, "error": str(exc),
                     })
                 write_row(RESULTS_CSV, row)
 
@@ -678,16 +709,22 @@ def run_scenario(
                         )
                     elif scenario in ("pseudonym", "direct_pseudonym"):
                         key = PSEUDONYM_PRIVATE_KEY
+                        pseudonym_gen_seconds = None
                         if not key:
+                            # increment index per iteration so each tx uses a different pseudonym
+                            current_hd_index = PSEUDONYM_HD_INDEX + (total_sent - 1)
+                            pseudonym_gen_start = time.perf_counter()
                             _, key = resolve_pseudonym_private_key(
                                 seed_file=PSEUDONYM_SEED_FILE,
-                                hd_index=PSEUDONYM_HD_INDEX,
+                                hd_index=current_hd_index,
                             )
+                            pseudonym_gen_seconds = round(time.perf_counter() - pseudonym_gen_start, 6)
                         result = direct_or_pseudonym_run(
                             scenario, data, deployment, w3, contract, nonce_cache, key,
                         )
+                        result["pseudonym_gen_seconds"] = pseudonym_gen_seconds
                     else:
-                        raise ValueError(f"Unknown scenario: {scenario}")
+                        raise ValueError(f"Unknown scenario: {scenario} (available: direct, pseudonym, direct_pseudonym, oracle, redeem, redeem_pseudonym)")
 
                     row.update(result)
                     status = int(result.get("tx_status", 0))
@@ -706,10 +743,9 @@ def run_scenario(
                         "block_number": None, "e1_original_micro": None, "e1_after_micro": None,
                         "e1_original_brl": None, "e1_after_brl": None,
                         "oracle_process_seconds": None, "oracle_confirm_seconds": None,
-                        "zkp_enabled": None, "zk_proof_seconds": None, "error": str(exc),
+                        "zkp_enabled": None, "zk_proof_seconds": None,
+                        "pseudonym_gen_seconds": None, "error": str(exc),
                     })
-
-                write_row(RESULTS_CSV, row)
 
     except KeyboardInterrupt:
         print(f"\n[!] Interrupted during scenario '{scenario}'. Saving partial summary...")
