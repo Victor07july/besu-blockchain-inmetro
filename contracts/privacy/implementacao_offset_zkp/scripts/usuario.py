@@ -532,18 +532,27 @@ def send_direct_without_offset(
 	vehicle_id: str,
 	estimated_e1_micro: int = 0,
 ) -> Dict[str, Any]:
-	# Usa o e1 pre-calculado pelo Python (mesma logica do test_adapted.py).
-	# Chama mintWithOracleValue para que o contrato armazene o valor correto
-	# em vez de recalcular internamente com _performCalculations (que opera
-	# em gramas reais, incompativel com a unidade bruta do SUMO no CSV).
-	final_e1_micro = max(estimated_e1_micro, 0)
+	# Chama calculateAndMintWithHash para que o CONTRATO calcule o e1Value
+	# internamente a partir dos CalculationParams (distancias, consumos, CO2).
 	next_token_before = get_next_token_id_onchain(deployment_file)
+
+	params_tuple = [
+		int(contract_params.get("highwayDistance",   0)),
+		int(contract_params.get("cityDistance",      0)),
+		int(contract_params.get("ethanolPercent",    0)),
+		int(contract_params.get("roadGasoline",      0)),
+		int(contract_params.get("roadEthanol",       0)),
+		int(contract_params.get("cityGasoline",      0)),
+		int(contract_params.get("cityEthanol",       0)),
+		int(contract_params.get("realCO2Emissions",  0)),
+		int(contract_params.get("carbonPricePerTon", 0)),
+	]
 
 	payload = [
 		{
-			"vehicle_id": vehicle_id,
-			"oracle_value": final_e1_micro,
-			"recipient": recipient,
+			"vehicle_id":    vehicle_id,
+			"params":        params_tuple,
+			"recipient":     recipient,
 			"original_hash": to_bytes32_hex(hash_original),
 		}
 	]
@@ -552,8 +561,8 @@ def send_direct_without_offset(
 		results=payload,
 		deployment_file=deployment_file,
 		private_key=private_key,
-		method_name="mintWithOracleValue",
-		method_args_spec=["$.oracle_value", "$.recipient", "$.original_hash"],
+		method_name="calculateAndPay",
+		method_args_spec=["$.params", "$.recipient", "$.original_hash"],
 	)
 
 	minted_token_id = int(next_token_before)
@@ -561,8 +570,8 @@ def send_direct_without_offset(
 	onchain_hash = read_hash_onchain(deployment_file, minted_token_id)
 
 	return {
-		"estimated_e1_micro": final_e1_micro,
-		"estimated_e1_reais": round(final_e1_micro / 1e6, 6),
+		"estimated_e1_micro": estimated_e1_micro,
+		"estimated_e1_reais": round(estimated_e1_micro / 1e6, 6),
 		"minted_token_id": minted_token_id,
 		"hash_match": hash_match,
 		"onchain_hash": onchain_hash,
@@ -753,16 +762,19 @@ def main() -> None:
 		progress_print(f"Hash bate? {'SIM' if match else 'NAO'}")
 		return
 
-	answer = input("Deseja aplicar ofuscacao por Offset neste trajeto? (S/N): ").strip().lower()
+	progress_print("\nEscolha o modo de envio:")
+	progress_print("  1 - Com ofuscacao  : oraculo gera opcoes de trajeto deslocado, voce escolhe")
+	progress_print("  2 - Sem ofuscacao  : oraculo registra o trajeto original diretamente (com ZKP)")
+	progress_print("  3 - Direto         : envia sem passar pelo oraculo (sem ZKP)")
+	answer = input("Opcao (1/2/3): ").strip()
 
-	if answer in ("s", "sim", "y", "yes"):
+	if answer == "1":
 		progress_print(
 			"Modo offset: "
 			+ ("map matching OSM ATIVADO" if args.enable_map_matching else "map matching OSM DESATIVADO")
 		)
 		payload = {
 			"trajetoria": data["trajectory"],
-			"hash_trajetoria_original": data["hash"],
 			"vehicle_id": data["vehicle_id"],
 			"attempts": args.attempts,
 			"top_k": 5,
@@ -864,8 +876,38 @@ def main() -> None:
 				progress_print(f"Hash bate? {'SIM' if match else 'NAO'}")
 			except ValueError:
 				progress_print("tokenId invalido; pulando auditoria manual")
+	elif answer == "2":
+		# Modo sem ofuscacao via oraculo: registra trajeto original com ZKP
+		progress_print("\nEnviando trajeto original ao oraculo para registro com ZKP (sem ofuscacao)...")
+		payload = {
+			"trajetoria": data["trajectory"],
+			"vehicle_id": data["vehicle_id"],
+			"contract_params": strip_aux_fields(data["contract_params"]),
+		}
+		start_reg = time.perf_counter()
+		try:
+			resp = requests.post(
+				f"{args.oracle_url}/registrar_trajeto",
+				json=payload,
+				timeout=None,
+			)
+		except requests.exceptions.RequestException as exc:
+			raise RuntimeError(f"Erro de comunicacao com o oraculo em /registrar_trajeto: {exc}") from exc
+		elapsed_reg = time.perf_counter() - start_reg
+		progress_print(f"Oraculo respondeu em {elapsed_reg:.3f}s")
+		if resp.status_code != 200:
+			raise RuntimeError(f"Erro no oraculo: {resp.status_code} - {resp.text}")
+
+		reg_body = resp.json()
+		progress_print("\nTrajeto registrado na blockchain pelo oraculo (sem ofuscacao)")
+		progress_print(f"Hash original armazenado: {reg_body['hash_original']}")
+		progress_print(f"Poseidon root: {reg_body.get('poseidon_root', 'N/A')}")
+		progress_print(f"ZKP habilitado: {reg_body.get('zkp_enabled')}")
+		progress_print(f"Monetizacao: {reg_body['monetizacao_e1_reais']:.6f} BRL")
+		progress_print(f"TX: {', '.join(reg_body['tx_hashes'])}")
 	else:
-		progress_print("\nUsuario optou por nao aplicar offset")
+		# Modo 3 ou qualquer outro: envia sem passar pelo oraculo
+		progress_print("\nUsuario optou por envio direto (sem oraculo)")
 		progress_print("Dados confirmados do trajeto original:")
 		progress_print(f"VIN: {data['vehicle_id']}")
 		progress_print(f"Hash original: {data['hash']}")
@@ -883,7 +925,7 @@ def main() -> None:
 
 		progress_print("\nEnvio direto concluido")
 		progress_print(f"Carteira do usuario: {user_address}")
-		progress_print(f"Monetizacao estimada sem deslocamento: {direct['estimated_e1_reais']:.6f} BRL")
+		progress_print(f"Monetizacao estimada: {direct['estimated_e1_reais']:.6f} BRL")
 		progress_print(f"Token mintado: {direct['minted_token_id']}")
 		progress_print(f"Hash on-chain: {direct['onchain_hash']}")
 		progress_print(f"Hash bate? {'SIM' if direct['hash_match'] else 'NAO'}")

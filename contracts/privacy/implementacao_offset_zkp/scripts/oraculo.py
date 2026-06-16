@@ -9,6 +9,7 @@ Endpoints:
 """
 
 import argparse
+import csv
 import hashlib
 import json
 import logging
@@ -18,12 +19,14 @@ import random
 import subprocess
 import tempfile
 import time
+import traceback
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 import uvicorn
 from eth_account import Account
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from web3 import Web3
@@ -33,6 +36,13 @@ from blockchain_sender import load_deployment_info, send_oracle_results
 try:
     import osmnx as ox
     from shapely.geometry import Point
+
+    # Timeout da requisicao HTTP a Overpass API (padrao: 180s — muito alto).
+    # Reduza via variavel de ambiente ORACLE_OSM_TIMEOUT se necessario.
+    ox.settings.requests_timeout = int(os.environ.get("ORACLE_OSM_TIMEOUT", "30"))
+    # Propagar logs do osmnx para o handler raiz do Python (capturado pelo FileHandler).
+    ox.settings.log_console = False  # evitar duplicar no terminal
+    ox.settings.log_file = False     # gerenciamos o arquivo de log manualmente
 
     MAP_MATCHING_AVAILABLE = True
 except ImportError:
@@ -53,6 +63,10 @@ DEFAULT_PORT = 5000
 DEFAULT_ZK_MAX_POINTS = 500
 DEFAULT_ZK_INPUT_SCALE = 1e7
 
+# Defina como True para salvar automaticamente CSV e JSON do trajeto ofuscado
+# em data/trajetos_ofuscados/ a cada confirmacao de opcao.
+SAVE_OBFUSCATED_TRIPS = True
+
 
 class ContractParamsInput(BaseModel):
     highwayDistance: Optional[int] = None
@@ -68,7 +82,6 @@ class ContractParamsInput(BaseModel):
 
 class ProcessarTrajetoRequest(BaseModel):
     trajetoria: List[List[float]] = Field(..., min_length=2)
-    hash_trajetoria_original: str
     vehicle_id: Optional[str] = "veh0"
     attempts: int = DEFAULT_ATTEMPTS
     top_k: int = DEFAULT_TOP_K
@@ -90,6 +103,118 @@ logger = logging.getLogger("uvicorn.error")
 
 # Pendencias em memoria: request_id -> dados da proposta
 PENDING_SELECTIONS: Dict[str, Dict[str, Any]] = {}
+
+
+# -----------------------------------------------------------------------
+# Logging para arquivo
+# -----------------------------------------------------------------------
+def _get_log_dir() -> str:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.abspath(os.path.join(script_dir, "..", "data"))
+
+
+def setup_file_logging() -> Optional[str]:
+    """
+    Adiciona um FileHandler ao logger raiz para persistir todos os logs
+    em data/oraculo.log (ou no caminho definido por ORACLE_LOG_FILE).
+
+    Retorna o caminho do arquivo de log configurado, ou None se falhou.
+    """
+    log_path = os.environ.get("ORACLE_LOG_FILE", "").strip()
+    if not log_path:
+        log_dir = _get_log_dir()
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, "oraculo.log")
+
+    try:
+        file_handler = logging.FileHandler(log_path, encoding="utf-8")
+        file_handler.setLevel(logging.DEBUG)
+        formatter = logging.Formatter(
+            "%(asctime)s %(levelname)-8s %(name)s %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+        file_handler.setFormatter(formatter)
+
+        # Anexar ao logger raiz para capturar uvicorn, fastapi e osmnx
+        root_logger = logging.getLogger()
+        root_logger.addHandler(file_handler)
+        # Garantir nivel minimo no root para que DEBUG/INFO passem
+        if root_logger.level == logging.NOTSET or root_logger.level > logging.DEBUG:
+            root_logger.setLevel(logging.DEBUG)
+
+        return log_path
+    except Exception as exc:
+        # Nao impedir inicializacao por falha de log
+        print(f"[oraculo] AVISO: nao foi possivel configurar log em arquivo: {exc}", flush=True)
+        return None
+
+
+# -----------------------------------------------------------------------
+# Global exception handler — loga traceback completo e retorna detalhe
+# -----------------------------------------------------------------------
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    tb = traceback.format_exc()
+    logger.error(
+        "[oraculo] ERRO nao tratado em %s %s\n%s",
+        request.method,
+        request.url.path,
+        tb,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": str(exc),
+            "traceback": tb,
+        },
+    )
+
+
+def validate_environment() -> List[str]:
+    """Valida variaveis de ambiente obrigatorias e retorna lista de avisos/erros."""
+    issues = []
+
+    deployment_file = os.environ.get("ORACLE_DEPLOYMENT_FILE", "").strip()
+    oracle_key = os.environ.get("ORACLE_PRIVATE_KEY", "").strip()
+    zkp_enabled = os.environ.get("ORACLE_ZKP_ENABLED", "1").strip().lower() not in ("0", "false", "no")
+
+    if not deployment_file:
+        issues.append("ORACLE_DEPLOYMENT_FILE nao definido")
+    elif not os.path.exists(deployment_file):
+        issues.append(f"ORACLE_DEPLOYMENT_FILE nao encontrado: {deployment_file}")
+    else:
+        try:
+            deployment = load_deployment_info(deployment_file)
+            rpc_url = deployment.get("rpc_url", "http://localhost:8545")
+            w3 = Web3(Web3.HTTPProvider(rpc_url))
+            _ = w3.eth.chain_id
+            _ = w3.eth.block_number
+        except Exception as exc:
+            issues.append(f"Falha ao carregar/conectar deployment_file={deployment_file}: {exc}")
+
+    if not oracle_key:
+        issues.append("ORACLE_PRIVATE_KEY nao definido")
+    else:
+        try:
+            addr = Account.from_key(oracle_key).address
+            logger.info("[oraculo] carteira do oraculo: %s", addr)
+        except Exception as exc:
+            issues.append(f"ORACLE_PRIVATE_KEY invalida: {exc}")
+
+    if zkp_enabled:
+        zk_dir = resolve_zk_dir()
+        prover_script = os.path.join(zk_dir, "scripts", "prove.js")
+        if not os.path.exists(prover_script):
+            issues.append(
+                f"ZKP habilitado mas prover nao encontrado: {prover_script} "
+                f"(defina ORACLE_ZKP_DIR ou desative com ORACLE_ZKP_ENABLED=0)"
+            )
+        else:
+            logger.info("[oraculo] ZKP habilitado, prover encontrado em: %s", prover_script)
+    else:
+        logger.info("[oraculo] ZKP desabilitado (ORACLE_ZKP_ENABLED=0)")
+
+    return issues
 
 
 def log_map_matching_status(enabled: bool, radius_m: int) -> None:
@@ -148,6 +273,19 @@ def log_oracle_runtime_info() -> None:
 @app.on_event("startup")
 def on_startup() -> None:
     log_oracle_runtime_info()
+
+    # Valida variaveis de ambiente e loga problemas encontrados
+    issues = validate_environment()
+    if issues:
+        logger.error("[oraculo] PROBLEMAS DE CONFIGURACAO DETECTADOS NO STARTUP:")
+        for issue in issues:
+            logger.error("[oraculo]   - %s", issue)
+        logger.error(
+            "[oraculo] O servidor iniciou mas pode falhar ao processar requisicoes. "
+            "Corrija as variaveis de ambiente acima."
+        )
+    else:
+        logger.info("[oraculo] Configuracao validada com sucesso.")
 
 
 def generate_zk_proof(
@@ -267,7 +405,25 @@ def apply_offset(points: List[List[float]], offset_lat: float, offset_lon: float
 def get_road_graph(center_lat: float, center_lon: float, search_radius_m: int):
     if not MAP_MATCHING_AVAILABLE:
         return None
-    return ox.graph_from_point((center_lat, center_lon), dist=search_radius_m, network_type="drive", simplify=False)
+    t0 = time.perf_counter()
+    logger.info(
+        "[map_matching] consultando Overpass API: centro=(%.6f, %.6f) raio=%sm",
+        center_lat, center_lon, search_radius_m,
+    )
+    graph = ox.graph_from_point(
+        (center_lat, center_lon),
+        dist=search_radius_m,
+        network_type="drive",
+        simplify=False,
+    )
+    elapsed = time.perf_counter() - t0
+    logger.info(
+        "[map_matching] grafo obtido em %.2fs: %d nos, %d arestas",
+        elapsed,
+        len(graph.nodes),
+        len(graph.edges),
+    )
+    return graph
 
 
 def snap_point_to_road(graph, lat: float, lon: float) -> List[float]:
@@ -283,7 +439,8 @@ def snap_point_to_road(graph, lat: float, lon: float) -> List[float]:
 
         node = ox.distance.nearest_nodes(graph, X=lon, Y=lat)
         return [float(graph.nodes[node]["y"]), float(graph.nodes[node]["x"])]
-    except Exception:
+    except Exception as exc:
+        logger.warning("[map_matching] snap_point_to_road falhou em (%.6f, %.6f): %s", lat, lon, exc)
         return [lat, lon]
 
 
@@ -296,7 +453,11 @@ def maybe_map_match(points: List[List[float]], enabled: bool, search_radius_m: i
 
     try:
         graph = get_road_graph(center_lat, center_lon, search_radius_m)
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "[map_matching] get_road_graph falhou (centro=(%.6f, %.6f) raio=%sm): %s",
+            center_lat, center_lon, search_radius_m, exc,
+        )
         return points
 
     return [snap_point_to_road(graph, p[0], p[1]) for p in points]
@@ -309,13 +470,6 @@ def privacy_diff_percent(orig_km: float, private_km: float) -> float:
 
 
 def simulate_e1_value(contract_params: Dict[str, int]) -> int:
-    """Estima o valor e1 em micro-BRL usando a mesma logica do test_adapted.py.
-
-    Os params estao em micros (x1e6) da escala original do CSV.
-    Meta: (dist_city/city_cons + dist_highway/road_cons) * emission_factor
-    Diff: max(0, meta - real_co2) — ambos na escala CSV.
-    Monetizacao: diff * carbon_price / 1_000_000
-    """
     road_gas_micro = int(contract_params.get("roadGasoline", 0))
     city_gas_micro = int(contract_params.get("cityGasoline", 0))
     price_micro = int(contract_params.get("carbonPricePerTon", 0))
@@ -344,7 +498,6 @@ def simulate_e1_value(contract_params: Dict[str, int]) -> int:
 
 
 def compute_meta_diff(contract_params: Dict[str, int]) -> Tuple[int, int]:
-    """Retorna (meta_micro, diff_micro) usando a mesma logica do test_adapted.py."""
     road_gas_micro = int(contract_params.get("roadGasoline", 0))
     city_gas_micro = int(contract_params.get("cityGasoline", 0))
     if road_gas_micro <= 0 or city_gas_micro <= 0:
@@ -410,10 +563,6 @@ def derive_private_real_co2(original_real_co2: int, private_km: float, original_
 
 
 def capped_private_value(original_value: int, private_diff_abs_percent: float, private_raw_value: int) -> int:
-    # Novo criterio:
-    # 1) teto maximo do ofuscado = 90% do original
-    # 2) quanto maior a diferenca de trajeto, maior a penalizacao
-    # 3) sem saturacao em 10%
     base_cap = original_value * 0.9
     distance_penalty_ratio = max(0.0, 1.0 - (private_diff_abs_percent / 100.0))
     cap_rule = int(base_cap * distance_penalty_ratio)
@@ -428,8 +577,13 @@ def is_zk_enabled() -> bool:
 @app.get("/health")
 def health() -> Dict[str, Any]:
     pending = len(PENDING_SELECTIONS)
-    logger.info("[oraculo] healthcheck pending_requests=%s", pending)
-    return {"status": "ok", "pending_requests": pending}
+    issues = validate_environment()
+    logger.info("[oraculo] healthcheck pending_requests=%s config_issues=%s", pending, len(issues))
+    return {
+        "status": "ok" if not issues else "degraded",
+        "pending_requests": pending,
+        "config_issues": issues,
+    }
 
 
 @app.post("/processar_trajeto")
@@ -454,17 +608,8 @@ def processar_trajeto(req: ProcessarTrajetoRequest) -> Dict[str, Any]:
     if len(trajectory) < 2:
         raise HTTPException(status_code=400, detail="trajetoria precisa de ao menos 2 pontos")
 
+    # Hash calculado internamente pelo oraculo — nao mais enviado pelo cliente
     computed_hash = build_trajectory_hash(trajectory)
-    provided_hash = req.hash_trajetoria_original.lower().replace("0x", "")
-    if computed_hash != provided_hash:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "erro": "hash_trajetoria_original invalido",
-                "hash_enviado": req.hash_trajetoria_original,
-                "hash_calculado": computed_hash,
-            },
-        )
 
     original_km = trajectory_distance_km(trajectory)
     contract_params_original = build_contract_params_from_trajectory(trajectory, req.contract_params)
@@ -554,7 +699,7 @@ def processar_trajeto(req: ProcessarTrajetoRequest) -> Dict[str, Any]:
     PENDING_SELECTIONS[request_id] = {
         "request_id": request_id,
         "vehicle_id": req.vehicle_id,
-        "original_hash": to_bytes32_hex(req.hash_trajetoria_original),
+        "original_hash": to_bytes32_hex(computed_hash),
         "original_trajectory": [normalize_point(p) for p in trajectory],
         "original_contract_params": contract_params_original,
         "original_e1_micro": int(original_value),
@@ -576,7 +721,7 @@ def processar_trajeto(req: ProcessarTrajetoRequest) -> Dict[str, Any]:
         "request_id": request_id,
         "vehicle_id": req.vehicle_id,
         "original": {
-            "hash": req.hash_trajetoria_original,
+            "hash": computed_hash,
             "distance_km": original_km,
             "e1_micro": int(original_value),
             "e1_reais": round(original_value / 1e6, 6),
@@ -596,6 +741,164 @@ def processar_trajeto(req: ProcessarTrajetoRequest) -> Dict[str, Any]:
             "map_matching_available": MAP_MATCHING_AVAILABLE,
             "processing_seconds": round(elapsed, 6),
         },
+    }
+
+
+class RegistrarTrajetoRequest(BaseModel):
+    trajetoria: List[List[float]] = Field(..., min_length=2)
+    vehicle_id: Optional[str] = "veh0"
+    contract_params: Optional[ContractParamsInput] = None
+    min_value_micro: Optional[int] = None
+
+
+@app.post("/registrar_trajeto")
+def registrar_trajeto(req: RegistrarTrajetoRequest) -> Dict[str, Any]:
+    """
+    Registra o trajeto original na blockchain SEM ofuscacao.
+    Calcula a monetizacao e faz o mint com ZKP, igual ao fluxo
+    /processar_trajeto + /confirmar_opcao, mas usando o trajeto
+    original diretamente (sem gerar opcoes de offset).
+    """
+    started_at = time.perf_counter()
+    logger.info(
+        "[oraculo] inicio /registrar_trajeto vehicle=%s",
+        req.vehicle_id,
+    )
+
+    trajectory = [[float(p[0]), float(p[1])] for p in req.trajetoria]
+    if len(trajectory) < 2:
+        raise HTTPException(status_code=400, detail="trajetoria precisa de ao menos 2 pontos")
+
+    # Hash calculado internamente pelo oraculo — nao mais enviado pelo cliente
+    computed_hash = build_trajectory_hash(trajectory)
+
+    contract_params = build_contract_params_from_trajectory(trajectory, req.contract_params)
+    original_value = simulate_e1_value(contract_params)
+
+    final_micro = int(original_value)
+    if final_micro <= 0:
+        if req.min_value_micro is not None and req.min_value_micro > 0:
+            logger.warning("[oraculo] /registrar_trajeto monetizacao zero; aplicando minimo=%s", req.min_value_micro)
+            final_micro = int(req.min_value_micro)
+        else:
+            raise HTTPException(status_code=400, detail="Valor de monetizacao calculado e zero")
+
+    deployment_file = os.environ.get("ORACLE_DEPLOYMENT_FILE", "").strip()
+    oracle_private_key = os.environ.get("ORACLE_PRIVATE_KEY", "").strip()
+
+    if not deployment_file:
+        raise HTTPException(status_code=500, detail="ORACLE_DEPLOYMENT_FILE nao definido")
+    if not os.path.exists(deployment_file):
+        raise HTTPException(status_code=500, detail=f"ORACLE_DEPLOYMENT_FILE nao encontrado: {deployment_file}")
+    if not oracle_private_key:
+        raise HTTPException(status_code=500, detail="ORACLE_PRIVATE_KEY nao definida")
+
+    oracle_address = Account.from_key(oracle_private_key).address
+    original_hash_bytes32 = to_bytes32_hex(computed_hash)
+
+    # Montar CalculationParams para enviar ao contrato
+    params_tuple = [
+        int(contract_params.get("highwayDistance",   0)),
+        int(contract_params.get("cityDistance",      0)),
+        int(contract_params.get("ethanolPercent",    0)),
+        int(contract_params.get("roadGasoline",      0)),
+        int(contract_params.get("roadEthanol",       0)),
+        int(contract_params.get("cityGasoline",      0)),
+        int(contract_params.get("cityEthanol",       0)),
+        int(contract_params.get("realCO2Emissions",  0)),
+        int(contract_params.get("carbonPricePerTon", 0)),
+    ]
+
+    # Gerar prova ZKP
+    zkp_enabled = is_zk_enabled()
+    if not zkp_enabled:
+        raise HTTPException(status_code=400, detail="ZKP obrigatorio para /registrar_trajeto")
+
+    zk_nonce = int(time.time_ns())
+    zk_start = time.perf_counter()
+    try:
+        zk_result = generate_zk_proof(
+            trajectory=trajectory,
+            recipient=oracle_address,
+            nonce=zk_nonce,
+        )
+    except Exception as exc:
+        logger.error("[oraculo] /registrar_trajeto falha ZK: %s\n%s", exc, traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Erro ao gerar prova ZK: {exc}") from exc
+    zk_proof_seconds = time.perf_counter() - zk_start
+
+    def parse_uint(value: Any) -> int:
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            return int(value, 0)
+        raise ValueError(f"Valor numerico invalido: {value}")
+
+    try:
+        proof = zk_result["proof"]
+        proof_a = [parse_uint(x) for x in proof["a"]]
+        proof_b = [
+            [parse_uint(x) for x in proof["b"][0]],
+            [parse_uint(x) for x in proof["b"][1]],
+        ]
+        proof_c = [parse_uint(x) for x in proof["c"]]
+        poseidon_root = zk_result["poseidon_root"]
+    except (KeyError, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=500, detail=f"Resposta ZK invalida: {exc}") from exc
+
+    payload: List[Dict[str, Any]] = [
+        {
+            "vehicle_id":    req.vehicle_id,
+            "params":        params_tuple,
+            "recipient":     oracle_address,
+            "original_hash": original_hash_bytes32,
+            "poseidon_root": poseidon_root,
+            "zk_nonce":      zk_nonce,
+            "proof_a":       proof_a,
+            "proof_b":       proof_b,
+            "proof_c":       proof_c,
+        }
+    ]
+
+    tx_wait_seconds = 0.0
+    try:
+        tx_start = time.perf_counter()
+        tx_hashes = send_oracle_results(
+            results=payload,
+            deployment_file=deployment_file,
+            private_key=oracle_private_key,
+            method_name="calculateAndMintWithZK",
+            method_args_spec=[
+                "$.params", "$.recipient", "$.original_hash",
+                "$.poseidon_root", "$.zk_nonce",
+                "$.proof_a", "$.proof_b", "$.proof_c",
+            ],
+        )
+        tx_wait_seconds = time.perf_counter() - tx_start
+    except Exception as exc:
+        logger.error(
+            "[oraculo] /registrar_trajeto falha ao enviar transacao: %s\n%s",
+            exc, traceback.format_exc(),
+        )
+        raise HTTPException(status_code=500, detail=f"Erro ao enviar transacao: {exc}") from exc
+
+    elapsed = time.perf_counter() - started_at
+    logger.info(
+        "[oraculo] fim /registrar_trajeto vehicle=%s elapsed=%.3fs",
+        req.vehicle_id,
+        elapsed,
+    )
+
+    return {
+        "status": "registrado",
+        "vehicle_id": req.vehicle_id,
+        "hash_original": original_hash_bytes32,
+        "poseidon_root": poseidon_root,
+        "zk_nonce": zk_nonce,
+        "zkp_enabled": zkp_enabled,
+        "zk_proof_seconds": round(zk_proof_seconds, 6),
+        "tx_wait_seconds": round(tx_wait_seconds, 6),
+        "tx_hashes": tx_hashes,
     }
 
 
@@ -626,118 +929,108 @@ def confirmar_opcao(req: ConfirmarOpcaoRequest) -> Dict[str, Any]:
         if min_value_micro < 0:
             raise HTTPException(status_code=400, detail="min_value_micro invalido")
 
-    deployment_file = os.environ.get("ORACLE_DEPLOYMENT_FILE")
-    oracle_private_key = os.environ.get("ORACLE_PRIVATE_KEY")
-    if not deployment_file or not oracle_private_key:
+    deployment_file = os.environ.get("ORACLE_DEPLOYMENT_FILE", "").strip()
+    oracle_private_key = os.environ.get("ORACLE_PRIVATE_KEY", "").strip()
+
+    if not deployment_file:
+        logger.error("[oraculo] ORACLE_DEPLOYMENT_FILE nao definido")
+        raise HTTPException(status_code=500, detail="ORACLE_DEPLOYMENT_FILE nao definido")
+    if not os.path.exists(deployment_file):
+        logger.error("[oraculo] ORACLE_DEPLOYMENT_FILE nao encontrado: %s", deployment_file)
         raise HTTPException(
             status_code=500,
-            detail="Configurar ORACLE_DEPLOYMENT_FILE e ORACLE_PRIVATE_KEY no ambiente",
+            detail=f"ORACLE_DEPLOYMENT_FILE nao encontrado: {deployment_file}",
         )
+    if not oracle_private_key:
+        logger.error("[oraculo] ORACLE_PRIVATE_KEY nao definida")
+        raise HTTPException(status_code=500, detail="ORACLE_PRIVATE_KEY nao definida")
 
     oracle_address = Account.from_key(oracle_private_key).address
-    final_micro = int(selected["monetizacao"]["private_final_e1_micro"])
-    if final_micro <= 0:
-        if min_value_micro is not None and min_value_micro > 0:
-            logger.warning(
-                "[oraculo] monetizacao zero; aplicando minimo=%s",
-                min_value_micro,
-            )
-            final_micro = int(min_value_micro)
+
+    # Montar CalculationParams da opcao selecionada
+    cp = selected["contract_params"]
+    params_tuple = [
+        int(cp.get("highwayDistance",   0)),
+        int(cp.get("cityDistance",      0)),
+        int(cp.get("ethanolPercent",    0)),
+        int(cp.get("roadGasoline",      0)),
+        int(cp.get("roadEthanol",       0)),
+        int(cp.get("cityGasoline",      0)),
+        int(cp.get("cityEthanol",       0)),
+        int(cp.get("realCO2Emissions",  0)),
+        int(cp.get("carbonPricePerTon", 0)),
+    ]
+
+    # Gerar prova ZKP (obrigatoria para calculateAndMintWithZK)
+    zkp_enabled = is_zk_enabled()
+    if not zkp_enabled:
+        raise HTTPException(status_code=400, detail="ZKP obrigatorio para /confirmar_opcao")
+
+    zk_nonce = int(time.time_ns())
+    zk_start = time.perf_counter()
+    try:
+        zk_result = generate_zk_proof(
+            trajectory=pending["original_trajectory"],
+            recipient=oracle_address,
+            nonce=zk_nonce,
+        )
+    except Exception as exc:
+        logger.error("[oraculo] Falha ao gerar prova ZK: %s\n%s", exc, traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Erro ao gerar prova ZK: {exc}") from exc
+    zk_proof_seconds = time.perf_counter() - zk_start
+
+    def parse_uint(value: Any) -> int:
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            return int(value, 0)
+        raise ValueError(f"Valor numerico invalido: {value}")
+
+    try:
+        proof = zk_result["proof"]
+        proof_a = [parse_uint(x) for x in proof["a"]]
+        proof_b = [
+            [parse_uint(x) for x in proof["b"][0]],
+            [parse_uint(x) for x in proof["b"][1]],
+        ]
+        proof_c = [parse_uint(x) for x in proof["c"]]
+        poseidon_root = zk_result["poseidon_root"]
+        public_signals = zk_result.get("public_signals", {})
+        ps_root = public_signals.get("root")
+        ps_recipient = public_signals.get("recipient")
+        ps_nonce = public_signals.get("nonce")
+        if ps_root is not None:
+            try:
+                root_hex = hex(int(ps_root))
+            except (TypeError, ValueError):
+                root_hex = str(ps_root)
         else:
-            raise HTTPException(status_code=400, detail="Valor final de monetizacao nao pode ser zero")
+            root_hex = None
+        logger.info(
+            "[oraculo] zk_public raw0=%s raw1=%s raw2=%s",
+            root_hex, ps_recipient, ps_nonce,
+        )
+        logger.info(
+            "[oraculo] zk_expected raw0=%s raw1=%s raw2=%s",
+            int(oracle_address, 16), zk_nonce, poseidon_root,
+        )
+    except (KeyError, ValueError, TypeError) as exc:
+        logger.error("[oraculo] Resposta ZK invalida: %s\n%s", exc, traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Resposta ZK invalida: {exc}") from exc
 
     payload: List[Dict[str, Any]] = [
         {
-            "vehicle_id": pending.get("vehicle_id", "veh0"),
-            "oracle_value": final_micro,
-            "recipient": oracle_address,
+            "vehicle_id":    pending.get("vehicle_id", "veh0"),
+            "params":        params_tuple,
+            "recipient":     oracle_address,
             "original_hash": pending["original_hash"],
+            "poseidon_root": poseidon_root,
+            "zk_nonce":      zk_nonce,
+            "proof_a":       proof_a,
+            "proof_b":       proof_b,
+            "proof_c":       proof_c,
         }
     ]
-
-    method_name = "mintWithOracleValue"
-    method_args_spec = ["$.oracle_value", "$.recipient", "$.original_hash"]
-
-    poseidon_root = None
-    zk_nonce = None
-    zkp_enabled = is_zk_enabled()
-    zk_proof_seconds = 0.0
-    if zkp_enabled:
-        zk_nonce = int(time.time_ns())
-        zk_start = time.perf_counter()
-        try:
-            zk_result = generate_zk_proof(
-                trajectory=pending["original_trajectory"],
-                recipient=oracle_address,
-                nonce=zk_nonce,
-            )
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Erro ao gerar prova ZK: {exc}") from exc
-        zk_proof_seconds = time.perf_counter() - zk_start
-
-        def parse_uint(value: Any) -> int:
-            if isinstance(value, int):
-                return value
-            if isinstance(value, str):
-                return int(value, 0)
-            raise ValueError(f"Valor numerico invalido: {value}")
-
-        try:
-            proof = zk_result["proof"]
-            proof_a = [parse_uint(x) for x in proof["a"]]
-            proof_b = [
-                [parse_uint(x) for x in proof["b"][0]],
-                [parse_uint(x) for x in proof["b"][1]],
-            ]
-            proof_c = [parse_uint(x) for x in proof["c"]]
-            poseidon_root = zk_result["poseidon_root"]
-            public_signals = zk_result.get("public_signals", {})
-            ps_root = public_signals.get("root")
-            ps_recipient = public_signals.get("recipient")
-            ps_nonce = public_signals.get("nonce")
-            if ps_root is not None:
-                try:
-                    root_hex = hex(int(ps_root))
-                except (TypeError, ValueError):
-                    root_hex = str(ps_root)
-            else:
-                root_hex = None
-            logger.info(
-                "[oraculo] zk_public raw0=%s raw1=%s raw2=%s",
-                root_hex,
-                ps_recipient,
-                ps_nonce,
-            )
-            logger.info(
-                "[oraculo] zk_expected raw0=%s raw1=%s raw2=%s",
-                int(oracle_address, 16),
-                zk_nonce,
-                poseidon_root,
-            )
-        except (KeyError, ValueError, TypeError) as exc:
-            raise HTTPException(status_code=500, detail=f"Resposta ZK invalida: {exc}") from exc
-
-        payload[0].update(
-            {
-                "poseidon_root": poseidon_root,
-                "zk_nonce": zk_nonce,
-                "proof_a": proof_a,
-                "proof_b": proof_b,
-                "proof_c": proof_c,
-            }
-        )
-
-        method_name = "mintWithOracleValueZK"
-        method_args_spec = [
-            "$.oracle_value",
-            "$.recipient",
-            "$.original_hash",
-            "$.poseidon_root",
-            "$.zk_nonce",
-            "$.proof_a",
-            "$.proof_b",
-            "$.proof_c",
-        ]
 
     tx_wait_seconds = 0.0
     try:
@@ -746,20 +1039,46 @@ def confirmar_opcao(req: ConfirmarOpcaoRequest) -> Dict[str, Any]:
             results=payload,
             deployment_file=deployment_file,
             private_key=oracle_private_key,
-            method_name=method_name,
-            method_args_spec=method_args_spec,
+            method_name="calculateAndMintWithZK",
+            method_args_spec=[
+                "$.params", "$.recipient", "$.original_hash",
+                "$.poseidon_root", "$.zk_nonce",
+                "$.proof_a", "$.proof_b", "$.proof_c",
+            ],
         )
         tx_wait_seconds = time.perf_counter() - tx_start
     except Exception as exc:
+        logger.error(
+            "[oraculo] Falha ao enviar transacao: %s\n%s", exc, traceback.format_exc()
+        )
         raise HTTPException(status_code=500, detail=f"Erro ao enviar transacao: {exc}") from exc
+
+    # ------------------------------------------------------------------
+    # Salvar copia do trajeto ofuscado (CSV e JSON) — controlado por
+    # SAVE_OBFUSCATED_TRIPS no topo deste arquivo.
+    # ------------------------------------------------------------------
+    saved_files = None
+    if SAVE_OBFUSCATED_TRIPS:
+        saved_files = save_obfuscated_trip(
+            vehicle_id=str(pending.get("vehicle_id", "veh0")),
+            request_id=req.request_id,
+            original_trajectory=pending["original_trajectory"],
+            private_trajectory=selected["trajectory_private"],
+            original_km=selected["distance"]["original_km"],
+            private_km=selected["distance"]["private_km"],
+            contract_params=selected["contract_params"],
+            e1_reais=0.0,  # calculado pelo contrato
+        )
+        logger.info("[oraculo] arquivos ofuscados salvos: %s", saved_files)
+    else:
+        logger.debug("[oraculo] SAVE_OBFUSCATED_TRIPS=False; arquivos nao salvos.")
 
     PENDING_SELECTIONS.pop(req.request_id, None)
 
     logger.info(
-        "[oraculo] fim /confirmar_opcao request_id=%s option_index=%s monetizacao_micro=%s",
+        "[oraculo] fim /confirmar_opcao request_id=%s option_index=%s",
         req.request_id,
         req.option_index,
-        final_micro,
     )
 
     return {
@@ -773,17 +1092,128 @@ def confirmar_opcao(req: ConfirmarOpcaoRequest) -> Dict[str, Any]:
         "zkp_enabled": zkp_enabled,
         "zk_proof_seconds": round(zk_proof_seconds, 6),
         "tx_wait_seconds": round(tx_wait_seconds, 6),
-        "monetizacao_e1_micro": final_micro,
-        "monetizacao_e1_reais": round(final_micro / 1e6, 6),
         "tx_hashes": tx_hashes,
+        "arquivos_ofuscados": saved_files,
+        "aviso": "e1Value calculado pelo contrato via calculateAndMintWithZK",
+    }
+
+
+def _get_obfuscated_output_dir() -> str:
+    """Retorna o caminho absoluto para data/trajetos_ofuscados/."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.abspath(os.path.join(script_dir, "..", "data", "trajetos_ofuscados"))
+
+
+def _next_trip_number(output_dir: str) -> int:
+    """
+    Retorna o proximo numero sequencial disponivel na pasta output_dir,
+    baseado nos arquivos trajeto_NNN.csv ja existentes.
+    Funciona mesmo apos reinicializacao do oraculo.
+    """
+    existing = [
+        f for f in os.listdir(output_dir)
+        if f.startswith("trajeto_") and f.endswith(".csv")
+    ]
+    numbers = []
+    for name in existing:
+        stem = name[len("trajeto_"):-len(".csv")]
+        if stem.isdigit():
+            numbers.append(int(stem))
+    return (max(numbers) + 1) if numbers else 1
+
+
+def save_obfuscated_trip(
+    vehicle_id: str,
+    request_id: str,
+    original_trajectory: List[List[float]],
+    private_trajectory: List[List[float]],
+    original_km: float,
+    private_km: float,
+    contract_params: Dict[str, int],
+    e1_reais: float,
+) -> Dict[str, str]:
+    """
+    Salva uma copia do trajeto ofuscado em data/trajetos_ofuscados/:
+      - <vehicle_id>_<request_id_curto>.csv  : pontos do trajeto ofuscado (lat, lon)
+      - <vehicle_id>_<request_id_curto>.json : formato esperado pelo visualize_trips.py
+
+    So e chamada quando SAVE_OBFUSCATED_TRIPS = True.
+    Retorna um dict com os caminhos dos arquivos salvos.
+    """
+    output_dir = _get_obfuscated_output_dir()
+    os.makedirs(output_dir, exist_ok=True)
+
+    trip_number = _next_trip_number(output_dir)
+    base_name = f"trajeto_{trip_number:03d}"
+
+    # ------------------------------------------------------------------
+    # 1. CSV — pontos do trajeto ofuscado
+    # ------------------------------------------------------------------
+    csv_path = os.path.join(output_dir, f"{base_name}.csv")
+    try:
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["lat", "lon"])
+            for point in private_trajectory:
+                writer.writerow([point[0], point[1]])
+        logger.info("[oraculo] CSV ofuscado salvo: %s", csv_path)
+    except Exception as exc:
+        logger.warning("[oraculo] Falha ao salvar CSV ofuscado: %s", exc)
+        csv_path = None
+
+    # ------------------------------------------------------------------
+    # 2. JSON — formato esperado pelo visualize_trips.py
+    # ------------------------------------------------------------------
+    real_co2_g = contract_params.get("realCO2Emissions", 0) / 1e6
+    emission_factor = 2310.0
+    road_gas = contract_params.get("roadGasoline", 1) / 1e6 or 1.0
+    city_gas = contract_params.get("cityGasoline", 1) / 1e6 or 1.0
+    highway_km = contract_params.get("highwayDistance", 0) / 1e6
+    city_km_val = contract_params.get("cityDistance", 0) / 1e6
+    meta_g = (highway_km / road_gas * emission_factor) + (city_km_val / city_gas * emission_factor)
+    delta_co2_g = max(0.0, meta_g - real_co2_g)
+
+    trip_record = {
+        "vin": vehicle_id,
+        "model": vehicle_id,
+        "trajectory_id": base_name,
+        "total_distance_km": round(private_km, 6),
+        "co2_real_g": round(real_co2_g, 6),
+        "delta_co2_g": round(delta_co2_g, 6),
+        "valor_e1_reais": round(e1_reais, 6),
+        "trajectory_original": [[round(p[0], 7), round(p[1], 7)] for p in original_trajectory],
+        "trajectory_private": [[round(p[0], 7), round(p[1], 7)] for p in private_trajectory],
+        "meta": {
+            "request_id": request_id,
+            "original_km": round(original_km, 6),
+            "private_km": round(private_km, 6),
+        },
+    }
+
+    json_path = os.path.join(output_dir, f"{base_name}.json")
+    try:
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump([trip_record], f, ensure_ascii=False, indent=2)
+        logger.info("[oraculo] JSON ofuscado salvo: %s", json_path)
+    except Exception as exc:
+        logger.warning("[oraculo] Falha ao salvar JSON ofuscado: %s", exc)
+        json_path = None
+
+    return {
+        "csv": csv_path,
+        "json": json_path,
     }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Servidor API do Oraculo ( )")
+    parser = argparse.ArgumentParser(description="Servidor API do Oraculo")
     parser.add_argument("--host", default=DEFAULT_HOST, help="Host bind da API")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Porta da API")
     args = parser.parse_args()
+
+    log_path = setup_file_logging()
+    if log_path:
+        print(f"[oraculo] logs gravados em: {log_path}", flush=True)
 
     uvicorn.run(app, host=args.host, port=args.port)
 

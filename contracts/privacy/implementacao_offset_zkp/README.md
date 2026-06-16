@@ -85,4 +85,3 @@ Observacao de comparacao SUMO:
 - O oraculo agora tenta extrair distancia acumulada SUMO de forma robusta (`max` numerico) quando a coluna `distance` existir no CSV.
 - Quando disponivel, os arquivos de saida incluem comparacoes:
 	- `Distancia_SUMO_km`
-

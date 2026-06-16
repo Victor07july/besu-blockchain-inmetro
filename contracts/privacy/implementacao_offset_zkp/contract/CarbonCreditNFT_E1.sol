@@ -31,10 +31,12 @@ interface IZkVerifier {
  *   Se o CO2 do CSV ja estiver na mesma escala que o fator de emissao (2310), a comparacao e valida.
  * - carbonPricePerTon: BRL/tonelada * 1e6
  *
- * FLUXO RECOMENDADO:
- * - Para CSV do SUMO (CO2 em unidade bruta): usar mintWithOracleValue() passando o e1
- *   pre-calculado pelo Python (usuario.py ou oraculo.py), que garante a escala correta.
- * - Para dados com CO2 em gramas reais: usar calculateAndMintWithHash() diretamente.
+ * FLUXOS DISPONIVEIS:
+ * - calculateAndPay(): calcula e1 e paga ETH imediatamente ao recipient (sem NFT, sem ZKP).
+ *   Uso: envio direto, pseudonimo direto.
+ * - calculateAndMintWithHash(): calcula e1, minta NFT para o recipient e registra hash SHA.
+ *   O resgate ocorre via redeemWithZK() (requer poseidonRoot registrado pelo oraculo).
+ *   Uso: cenario com oraculo (offset ou direto).
  *
  * CONSTANTES:
  * - EMISSAO_GASOLINA = 2.310 kg CO2/L (= 2310 na escala do CSV)
@@ -93,6 +95,13 @@ contract CarbonCreditNFT_E1 is
         bytes32 indexed poseidonRoot,
         uint256 tokenId,
         uint256 amount,
+        uint256 timestamp
+    );
+
+    event DirectPayment(
+        address indexed recipient,
+        uint256 e1Value,
+        bytes32 originalTrajectoryHash,
         uint256 timestamp
     );
 
@@ -190,46 +199,59 @@ contract CarbonCreditNFT_E1 is
         return (tokenId, e1Value);
     }
 
-    function mintWithOracleValue(
-        uint256 oracleE1Value,
-        address recipient,
+    /**
+     * @notice Calcula o e1Value e paga ETH imediatamente ao recipient.
+     * Nao minta NFT — o credito e liquidado na mesma transacao.
+     * Uso: envio direto (sem oraculo, sem ZKP).
+     * Requer que o contrato tenha saldo ETH suficiente.
+     */
+    function calculateAndPay(
+        CalculationParams memory params,
+        address payable recipient,
         bytes32 originalTrajectoryHash
     )
         external
         onlyAuthorized
         nonReentrant
-        returns (uint256 tokenId, uint256 e1Value)
+        returns (uint256 e1Value)
     {
-        require(oracleE1Value > 0, "oracleE1Value deve ser > 0");
+        require(params.roadGasoline > 0, "Road gasoline deve ser > 0");
+        require(params.cityGasoline > 0, "City gasoline deve ser > 0");
+        require(params.carbonPricePerTon > 0, "Carbon price deve ser > 0");
+        require(recipient != address(0), "Recipient invalido");
 
-        tokenId = _nextTokenId++;
-        _safeMint(recipient, tokenId);
+        CalculationResult memory result = _performCalculations(params);
+        e1Value = result.e1Value;
+        require(e1Value > 0, "e1Value calculado e zero");
+        require(
+            address(this).balance >= e1Value,
+            "Saldo insuficiente no contrato"
+        );
 
-        CalculationResult memory result;
-        result.e1Value = oracleE1Value;
-        result.originalTrajectoryHash = originalTrajectoryHash;
-
-        tokenCalculations[tokenId] = result;
         if (originalTrajectoryHash != bytes32(0)) {
             registeredTrajectoryHashes[originalTrajectoryHash] = true;
         }
-        e1Value = oracleE1Value;
 
-        emit CarbonCreditCalculated(
+        (bool sent, ) = recipient.call{value: e1Value}("");
+        require(sent, "Falha ao transferir ETH");
+
+        emit DirectPayment(
             recipient,
-            tokenId,
-            result.metaCO2,
-            result.diff,
             e1Value,
             originalTrajectoryHash,
             block.timestamp
         );
 
-        return (tokenId, e1Value);
+        return e1Value;
     }
 
-    function mintWithOracleValueZK(
-        uint256 oracleE1Value,
+    /**
+     * @notice Calcula e1Value via ZKP, minta NFT com poseidonRoot registrado
+     * e armazena o valor para resgate posterior via redeemWithZK.
+     * Uso: cenario com oraculo (com ou sem offset).
+     */
+    function calculateAndMintWithZK(
+        CalculationParams memory params,
         address recipient,
         bytes32 originalTrajectoryHash,
         bytes32 poseidonRoot,
@@ -243,7 +265,6 @@ contract CarbonCreditNFT_E1 is
         nonReentrant
         returns (uint256 tokenId, uint256 e1Value)
     {
-        require(oracleE1Value > 0, "oracleE1Value deve ser > 0");
         require(poseidonRoot != bytes32(0), "poseidonRoot invalido");
         require(
             address(zkVerifier) != address(0),
@@ -253,6 +274,9 @@ contract CarbonCreditNFT_E1 is
             !registeredPoseidonRoots[poseidonRoot],
             "poseidonRoot ja registrado"
         );
+        require(params.roadGasoline > 0, "Road gasoline deve ser > 0");
+        require(params.cityGasoline > 0, "City gasoline deve ser > 0");
+        require(params.carbonPricePerTon > 0, "Carbon price deve ser > 0");
 
         bytes32 nullifier = keccak256(
             abi.encodePacked(poseidonRoot, recipient, nonce)
@@ -267,13 +291,15 @@ contract CarbonCreditNFT_E1 is
         );
         require(ok, "Proof ZK invalido");
 
+        CalculationResult memory result = _performCalculations(params);
+        e1Value = result.e1Value;
+        require(e1Value > 0, "e1Value calculado e zero");
+
         usedZkNullifiers[nullifier] = true;
 
         tokenId = _nextTokenId++;
         _safeMint(recipient, tokenId);
 
-        CalculationResult memory result;
-        result.e1Value = oracleE1Value;
         result.originalTrajectoryHash = originalTrajectoryHash;
         result.poseidonTrajectoryRoot = poseidonRoot;
 
@@ -283,7 +309,6 @@ contract CarbonCreditNFT_E1 is
         }
         registeredPoseidonRoots[poseidonRoot] = true;
         poseidonRootToTokenId[poseidonRoot] = tokenId;
-        e1Value = oracleE1Value;
 
         emit CarbonCreditCalculated(
             recipient,

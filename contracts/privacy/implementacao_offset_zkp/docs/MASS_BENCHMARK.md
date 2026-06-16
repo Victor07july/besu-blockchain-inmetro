@@ -11,12 +11,13 @@ Use chaves e seed de exemplo apenas para testes locais. Nao use chaves reais em 
 
 | Cenario | Descricao |
 |---|---|
-| `direct` | Envia tx com a chave real do usuario |
-| `pseudonym` | Envia tx com chave pseudonima (indice HD incrementa a cada tx) |
-| `direct_pseudonym` | Igual ao `pseudonym` (mesmo comportamento no codigo atual) |
-| `oracle` | Fluxo completo via API do oraculo (processar + confirmar opcao) |
-| `redeem` | Resgata saldo ZK usando a chave real do usuario |
-| `redeem_pseudonym` | Resgata saldo ZK usando chave pseudonima (indice HD incrementa a cada tx) |
+| `direct` | Mint assinado pela carteira do usuario (owner); NFT vai para o proprio usuario |
+| `pseudonym` | Mint assinado pela carteira do usuario (owner); NFT vai para carteira pseudonima |
+| `direct_pseudonym` | Igual ao `pseudonym` — alias para o mesmo fluxo |
+| `oracle` | Oraculo **ofusca** o trajeto (offset), calcula monetizacao e registra com ZKP |
+| `oracle_direto` | Oraculo registra o trajeto **original** (sem ofuscacao), calcula monetizacao e registra com ZKP |
+| `redeem` | Resgata creditos ZK usando a chave real do usuario |
+| `redeem_pseudonym` | Resgata creditos ZK usando chave pseudonima (indice HD incrementa a cada resgate) |
 
 Edite a variavel `SCENARIOS` no script para escolher quais cenarios executar:
 
@@ -28,20 +29,31 @@ SCENARIOS = ["oracle", "redeem"]
 
 ## Variaveis de ambiente
 
+### Autorizacao no contrato
+
+O contrato exige `onlyAuthorized` para fazer mint. Sao autorizadas automaticamente:
+a carteira que fez o **deploy** (owner) e enderecos registrados via `setAuthorized`.
+
+- Nos cenarios `pseudonym` e `direct_pseudonym`, **quem assina a transacao e
+  `BENCH_USER_PRIVATE_KEY`** (deve ser o owner ou autorizada). A carteira pseudonima
+  apenas **recebe o NFT como recipient** — nao precisa ser autorizada.
+- A chave pseudonima nunca assina transacoes de mint, apenas de resgate (`redeemWithZK`).
+
 ### Obrigatorias por cenario
 
-| Variavel | Cenario |
-|---|---|
-| `BENCH_USER_PRIVATE_KEY` | `direct`, fallback do `redeem` |
-| `BENCH_PSEUDONYM_PRIVATE_KEY` ou `BENCH_PSEUDONYM_SEED_FILE` | `pseudonym`, `direct_pseudonym`, `redeem_pseudonym` |
-| `BENCH_PSEUDONYM_HD_INDEX` | `pseudonym`, `direct_pseudonym`, `redeem_pseudonym` (padrao: 0) |
-| `BENCH_REDEEM_PRIVATE_KEY` | `redeem` (se nao definido, usa `BENCH_USER_PRIVATE_KEY`) |
+| Variavel | Cenario | Papel |
+|---|---|---|
+| `BENCH_USER_PRIVATE_KEY` | `direct`, `pseudonym`, `direct_pseudonym`, fallback do `redeem` | Assina a transacao (deve ser owner/autorizada) |
+| `BENCH_PSEUDONYM_PRIVATE_KEY` ou `BENCH_PSEUDONYM_SEED_FILE` | `pseudonym`, `direct_pseudonym`, `redeem_pseudonym` | Define o recipient (pseudonimo) ou a carteira de resgate |
+| `BENCH_PSEUDONYM_HD_INDEX` | pseudonimo | Indice inicial HD para derivar a carteira (padrao: 0) |
+| `BENCH_REDEEM_PRIVATE_KEY` | `redeem` | Chave para resgate (fallback: `BENCH_USER_PRIVATE_KEY`) |
+| `BENCH_ORACLE_URL` | `oracle`, `oracle_direto` | URL do oraculo (padrao: `http://127.0.0.1:5001`) |
 
 ### Comportamento do pseudonimo
 
 | Configuracao | Comportamento |
 |---|---|
-| Apenas `BENCH_PSEUDONYM_PRIVATE_KEY` | Chave fixa para todas as txs, sem incremento |
+| Apenas `BENCH_PSEUDONYM_PRIVATE_KEY` | Chave pseudonima fixa para todas as txs |
 | Apenas `BENCH_PSEUDONYM_SEED_FILE` | Deriva via HD wallet; indice incrementa a cada tx |
 | Os dois definidos | `BENCH_PSEUDONYM_PRIVATE_KEY` tem prioridade; seed file e ignorado |
 
@@ -119,37 +131,77 @@ python3 /home/inmetro/besu-starter-victor/contracts/privacy/implementacao_offset
 ### pseudonym com chave privada direta
 
 ```bash
-export BENCH_PSEUDONYM_PRIVATE_KEY=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
+export BENCH_USER_PRIVATE_KEY=0xc87509a1c067bbde78beb793e6fa76530b6382a4c0241e5e4a9ec0a0f44dc0d3  # owner — assina
+export BENCH_PSEUDONYM_PRIVATE_KEY=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d  # recipient
 export BENCH_DEPLOYMENT_FILE=/home/inmetro/besu-starter-victor/contracts/privacy/implementacao_offset_zkp/deployment_info.json
 
 # SCENARIOS = ["pseudonym"]
 python3 /home/inmetro/besu-starter-victor/contracts/privacy/implementacao_offset_zkp/scripts/mass_benchmark.py
 ```
 
-> Chave fixa — o mesmo pseudonimo e usado em todas as txs.
+> Pseudonimo fixo — o mesmo endereco pseudonimo recebe o NFT em todas as txs.
 
 ---
 
-### pseudonym com seed (indice incrementado a cada tx)
+### pseudonym com seed (recipient diferente a cada tx)
 
-Crie o arquivo de seed:
+Crie o arquivo de seed (uma unica vez):
 
 ```bash
-cat > /home/inmetro/seed.txt << 'EOF'
-orange canvas mirror soccer island pencil hazard forum update orbit lemon asset
-EOF
+python3 -c "
+from eth_account import Account
+Account.enable_unaudited_hdwallet_features()
+account, mnemonic = Account.create_with_mnemonic()
+print(mnemonic)
+" > /home/inmetro/seed.txt
+
+cat /home/inmetro/seed.txt
 ```
 
 ```bash
+export BENCH_USER_PRIVATE_KEY=0xc87509a1c067bbde78beb793e6fa76530b6382a4c0241e5e4a9ec0a0f44dc0d3  # owner — assina
+export BENCH_PSEUDONYM_SEED_FILE=/home/inmetro/seed.txt  # recipient derivado por HD
+export BENCH_PSEUDONYM_HD_INDEX=0
+export BENCH_DEPLOYMENT_FILE=/home/inmetro/besu-starter-victor/contracts/privacy/implementacao_offset_zkp/deployment_info.json
+
+# SCENARIOS = ["pseudonym"]  ou  SCENARIOS = ["direct_pseudonym"]
+python3 /home/inmetro/besu-starter-victor/contracts/privacy/implementacao_offset_zkp/scripts/mass_benchmark.py
+```
+
+> Recipient diferente a cada tx — indice HD comeca em 0 e incrementa automaticamente.
+> `BENCH_USER_PRIVATE_KEY` (owner) assina todas as transacoes.
+
+---
+
+### oracle_direto (sem ofuscacao, com ZKP)
+
+```bash
+export BENCH_ORACLE_URL=http://127.0.0.1:5001
+export BENCH_MIN_VALUE_MICRO=1
+export BENCH_DEPLOYMENT_FILE=/home/inmetro/besu-starter-victor/contracts/privacy/implementacao_offset_zkp/deployment_info.json
+
+# SCENARIOS = ["oracle_direto"]
+python3 /home/inmetro/besu-starter-victor/contracts/privacy/implementacao_offset_zkp/scripts/mass_benchmark.py
+```
+
+> O oraculo recebe o trajeto original, calcula a monetizacao e registra na blockchain
+> com ZKP via `/registrar_trajeto`. Nao ha ofuscacao. O resgate posterior com
+> `redeem` ou `redeem_pseudonym` funciona da mesma forma que no cenario `oracle`.
+
+---
+
+### oracle_direto + redeem_pseudonym
+
+```bash
+export BENCH_ORACLE_URL=http://127.0.0.1:5001
+export BENCH_MIN_VALUE_MICRO=1
 export BENCH_PSEUDONYM_SEED_FILE=/home/inmetro/seed.txt
 export BENCH_PSEUDONYM_HD_INDEX=0
 export BENCH_DEPLOYMENT_FILE=/home/inmetro/besu-starter-victor/contracts/privacy/implementacao_offset_zkp/deployment_info.json
 
-# SCENARIOS = ["pseudonym"]
+# SCENARIOS = ["oracle_direto", "redeem_pseudonym"]
 python3 /home/inmetro/besu-starter-victor/contracts/privacy/implementacao_offset_zkp/scripts/mass_benchmark.py
 ```
-
-> Pseudonimo diferente a cada tx — indice comeca em 0 e incrementa automaticamente.
 
 ---
 
@@ -205,6 +257,34 @@ Para comparar os dois cenarios, execute em execucoes separadas:
 ## Interrupcao
 
 Se cancelar com `Ctrl+C`, o script salva automaticamente um summary parcial com todas as txs concluidas ate o momento. A tx que estava em execucao no momento do cancelamento nao e incluida. O cenario aparece com o sufixo `_interrupted` no CSV.
+
+---
+
+## Arquivos de entrada (DATA_DIR)
+
+O benchmark detecta automaticamente o formato dos arquivos em `DATA_DIR`:
+
+| Padrao de arquivo | Comportamento |
+|---|---|
+| `vehicles_step_sim_*.csv` | Usado diretamente — CSVs originais do SUMO com todas as colunas |
+| `trajeto_*.csv` com colunas extras | Usado diretamente — CSV com informacoes suficientes |
+| `trajeto_*.csv` com apenas `lat`/`lon` | **Descartado** — o script busca automaticamente o `trajeto_*.json` correspondente no mesmo diretorio |
+| `trajeto_*.json` | Usado diretamente quando nao ha CSV suficiente — gerado pelo oraculo em `data/trajetos_ofuscados/` |
+
+### Usando trajetos ofuscados
+
+Para rodar o benchmark com os trajetos salvos pelo oraculo em `data/trajetos_ofuscados/`,
+basta alterar `DATA_DIR` no script:
+
+```python
+DATA_DIR = REPO_ROOT / "contracts" / "privacy" / "implementacao_offset_zkp" / "data" / "trajetos_ofuscados"
+```
+
+O script detectara que os `trajeto_*.csv` tem apenas `lat`/`lon`, e usara os
+`trajeto_*.json` correspondentes automaticamente. Cada JSON contem:
+- `trajectory_original` — trajeto original (usado para calcular o hash correto)
+- `trajectory_private` — trajeto ofuscado
+- `co2_real_g`, `total_distance_km`, `valor_e1_reais` — dados para reconstruir os `contract_params`
 
 ---
 
